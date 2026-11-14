@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -48,6 +49,7 @@ from pipeline.dreaming import (  # noqa: E402
     remember_memory,
 )
 from storage.catalog import Catalog, DEFAULT_KB_ROOT  # noqa: E402
+from storage.inbox import get_inbox_status, queue_inbox_send, spawn_detached_job
 
 logger = logging.getLogger("mcp.kb_router")
 if not logger.handlers:
@@ -764,6 +766,68 @@ class KBRouter:
                 "message": str(exc),
             })
 
+    def inbox_send(
+        self,
+        kb: str,
+        items: list[dict[str, Any]],
+        source_path: str | None = None,
+    ) -> str:
+        """Queue uploaded files or a local directory for asynchronous inbox processing."""
+        try:
+            record = self.get_kb(kb)
+            if not record:
+                return _serialize({"error": "KB_NOT_FOUND", "kb": kb})
+            job = queue_inbox_send(record, source_path=source_path, items=items if source_path is None else None)
+            return _serialize({"ok": True, "job_id": job["job_id"], "status": "queued", "file_count": job.get("file_count", 0)})
+        except Exception as exc:
+            return _serialize({"error": "INBOX_SEND_FAILED", "kb": kb, "message": str(exc)})
+
+    def inbox_consume(self, kb: str, job_id: str | None = None) -> str:
+        """Start asynchronous processing of pending inbox batches."""
+        try:
+            record = self.get_kb(kb)
+            if not record:
+                return _serialize({"error": "KB_NOT_FOUND", "kb": kb})
+            engine_python = Path(global_env().get("ENGINE_PYTHON", sys.executable))
+            worker_cmd = [str(engine_python), str(ROOT / "bin" / "ragcli.py"), "_worker_consume", kb]
+            if job_id:
+                worker_cmd.extend(["--job", job_id])
+            log_path = Path(record["data_dir"]) / "inbox.log"
+            pid = spawn_detached_job(worker_cmd, record["data_dir"], log_path, env=os.environ.copy())
+            return _serialize({"ok": True, "status": "queued", "pid": pid, "job_id": job_id})
+        except Exception as exc:
+            return _serialize({"error": "INBOX_CONSUME_FAILED", "kb": kb, "message": str(exc)})
+
+    def inbox_status(self, kb: str) -> str:
+        """Return pending, processing, processed and failed inbox batch counts."""
+        record = self.get_kb(kb)
+        if not record:
+            return _serialize({"error": "KB_NOT_FOUND", "kb": kb})
+        return _serialize(get_inbox_status(record))
+
+    def source_ingest(self, kb: str, sources: list[str] | None = None, force: bool = False) -> str:
+        """Start asynchronous incremental ingestion for configured external source paths."""
+        try:
+            record = self.get_kb(kb)
+            if not record:
+                return _serialize({"error": "KB_NOT_FOUND", "kb": kb})
+            configured = record.get("sources", [])
+            selected = sources or configured
+            unknown = [str(Path(item).expanduser().resolve()) for item in selected if str(Path(item).expanduser().resolve()) not in configured]
+            if unknown:
+                return _serialize({"error": "SOURCE_NOT_CONFIGURED", "sources": unknown})
+            engine_python = Path(global_env().get("ENGINE_PYTHON", sys.executable))
+            pids = []
+            for source in selected:
+                cmd = [str(engine_python), str(ROOT / "bin" / "ingest.py"), "--kb", kb, "--source-folder", source]
+                if force:
+                    cmd.append("--force")
+                log_path = Path(record["data_dir"]) / "ingest.log"
+                pids.append(spawn_detached_job(cmd, record["data_dir"], log_path, env=os.environ.copy()))
+            return _serialize({"ok": True, "status": "queued", "sources": selected, "pids": pids})
+        except Exception as exc:
+            return _serialize({"error": "SOURCE_INGEST_FAILED", "kb": kb, "message": str(exc)})
+
     def ingest_url(
         self,
         kb: str,
@@ -932,6 +996,30 @@ def build_mcp_server(router: KBRouter | None = None) -> FastMCP:
         )
 
     @mcp_app.tool()
+    def inbox_send(
+        kb: str,
+        items: list[dict[str, Any]],
+        source_path: str | None = None,
+    ) -> str:
+        """Queue file contents or a local path for asynchronous inbox processing."""
+        return active_router.inbox_send(kb=kb, items=items, source_path=source_path)
+
+    @mcp_app.tool()
+    def inbox_consume(kb: str, job_id: str | None = None) -> str:
+        """Start processing pending inbox batches in the background."""
+        return active_router.inbox_consume(kb=kb, job_id=job_id)
+
+    @mcp_app.tool()
+    def inbox_status(kb: str) -> str:
+        """Return asynchronous inbox queue status."""
+        return active_router.inbox_status(kb=kb)
+
+    @mcp_app.tool()
+    def source_ingest(kb: str, sources: list[str] | None = None, force: bool = False) -> str:
+        """Start background ingestion for configured external source paths."""
+        return active_router.source_ingest(kb=kb, sources=sources, force=force)
+
+    @mcp_app.tool()
     def ingest_url(
         kb: str,
         url: str,
@@ -970,6 +1058,94 @@ search_memory = router.search_memory
 deprecate_memory = router.deprecate_memory
 
 
+# MCP authentication middleware for web connectors and remote endpoints.
+# Invariant: Supports Bearer tokens, HTTP Basic auth, X-API-Key, and query parameters
+# to allow seamless connection from Claude Web, ChatGPT Custom GPTs, Grok, and Gemini.
+class MCPAuthMiddleware:
+    """ASGI middleware that enforces token-based authentication across multiple transport schemes."""
+
+    def __init__(self, app: Any, token: str) -> None:
+        self.app = app
+        self.token = token.strip()
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "GET")
+        path = scope.get("path", "")
+        # Always allow CORS preflight and health checks
+        if method == "OPTIONS" or path == "/health":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"").decode("utf-8", errors="ignore").strip()
+        api_key_header = headers.get(b"x-api-key", b"").decode("utf-8", errors="ignore").strip()
+        mcp_token_header = headers.get(b"x-mcp-token", b"").decode("utf-8", errors="ignore").strip()
+
+        authorized = False
+        # 1. Bearer Token (Claude Web, ChatGPT Actions, Grok, Gemini, curl)
+        if auth_header.startswith("Bearer "):
+            token_candidate = auth_header[7:].strip()
+            if token_candidate == self.token:
+                authorized = True
+
+        # 2. HTTP Basic Auth (browsers, web connectors)
+        elif auth_header.startswith("Basic "):
+            try:
+                import base64
+                decoded = base64.b64decode(auth_header[6:].strip()).decode("utf-8", errors="ignore")
+                user, _, password = decoded.partition(":")
+                if password == self.token or user == self.token:
+                    authorized = True
+            except Exception:
+                pass
+
+        # 3. Custom Headers: X-API-Key or X-MCP-Token
+        if not authorized:
+            if api_key_header == self.token or mcp_token_header == self.token:
+                authorized = True
+
+        # 4. Query Parameter (?token=... or ?key=...)
+        if not authorized:
+            from urllib.parse import parse_qs
+            query_string = scope.get("query_string", b"").decode("utf-8", errors="ignore")
+            params = parse_qs(query_string)
+            if self.token in params.get("token", []) or self.token in params.get("key", []):
+                authorized = True
+
+        if authorized:
+            await self.app(scope, receive, send)
+            return
+
+        # Deny unauthorized access with JSON-RPC error payload and standard 401
+        error_body = json.dumps({
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32001,
+                "message": "Unauthorized: valid MCP password or token required",
+            },
+        }).encode("utf-8")
+
+        response_headers = [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(error_body)).encode("ascii")),
+            (b"www-authenticate", b'Bearer realm="MCP", Basic realm="MCP"'),
+        ]
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": response_headers,
+        })
+        await send({
+            "type": "http.response.body",
+            "body": error_body,
+        })
+
+
 def main() -> None:
     """CLI entry point for running the FastMCP server."""
     parser = argparse.ArgumentParser(description="LightRAG-KB Multi-KB MCP Router")
@@ -982,16 +1158,29 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="Bind host for network transports")
     parser.add_argument("--port", type=int, default=8743, help="Bind port for network transports")
     parser.add_argument("--path", default="/mcp", help="Endpoint path for network transports")
+    parser.add_argument(
+        "--auth-token",
+        default=os.getenv("MCP_AUTH_TOKEN"),
+        help="Optional password/token to protect HTTP/SSE endpoints (default: env MCP_AUTH_TOKEN)",
+    )
     args, _ = parser.parse_known_args()
 
     if args.transport == "stdio":
         mcp.run(transport="stdio")
     else:
+        middleware = []
+        token = (args.auth_token or os.getenv("MCP_AUTH_TOKEN") or global_env().get("MCP_AUTH_TOKEN") or "").strip()
+        if token:
+            from starlette.middleware import Middleware
+            middleware.append(Middleware(MCPAuthMiddleware, token=token))
+            logger.info("MCP endpoint protected with authentication token.")
+
         mcp.run(
             transport=args.transport,
             host=args.host,
             port=args.port,
             path=args.path,
+            middleware=middleware,
         )
 
 

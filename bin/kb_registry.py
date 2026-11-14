@@ -145,9 +145,17 @@ def is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+# Build a normalized KB configuration dictionary.
+# Invariant: Each KB holds configuration for its directories, network port,
+# exclusion patterns, linked sources, and background link automation toggles.
 def create_kb_entry(name: str, source_dir: str, data_dir: str, derived_dir: str, rag_storage: str,
-                    port: int, exclude: list[str] | None = None) -> dict:
+                    port: int, exclude: list[str] | None = None,
+                    sources: list[str] | None = None,
+                    link: dict[str, bool] | None = None) -> dict:
     """Create a KB entry as a plain dict."""
+    default_link = {"consume": True, "ingest": True}
+    if link is not None:
+        default_link.update(link)
     return {
         "name": name,
         "source_dir": source_dir,
@@ -156,6 +164,8 @@ def create_kb_entry(name: str, source_dir: str, data_dir: str, derived_dir: str,
         "rag_storage": rag_storage,
         "port": port,
         "exclude": list(exclude or []),
+        "sources": list(sources or []),
+        "link": default_link,
     }
 
 
@@ -177,6 +187,8 @@ def normalize_kb(entry: dict, env: dict[str, str] | None = None) -> dict:
         rag_storage=str(rag_storage),
         port=int(entry.get("port") or env["BASE_PORT"]),
         exclude=entry.get("exclude", []),
+        sources=entry.get("sources", []),
+        link=entry.get("link"),
     )
 
 
@@ -208,6 +220,10 @@ def _registry_entry(kb: dict) -> dict:
     }
     if kb.get("exclude"):
         entry["exclude"] = list(kb["exclude"])
+    if kb.get("sources"):
+        entry["sources"] = list(kb["sources"])
+    if kb.get("link") is not None:
+        entry["link"] = dict(kb["link"])
     return entry
 
 
@@ -330,15 +346,14 @@ def _source_rel_dirs(source_dir: Path, data_dir: Path) -> list[str]:
     return rel_dirs
 
 
+# Check if a folder path matches an exclusion rule.
+# Invariant: If folder_spec does not contain a slash, it matches any folder segment
+# in the path hierarchy (e.g. '.venv' excludes nested virtualenvs at any depth).
 def _folder_rule_matches(rel_dir: str, folder_spec: str) -> bool:
     candidate = PurePosixPath(rel_dir)
     if "/" in folder_spec:
-        target = rel_dir
-    else:
-        if len(candidate.parts) != 1:
-            return False
-        target = candidate.name
-    return fnmatch.fnmatch(target, folder_spec)
+        return fnmatch.fnmatch(rel_dir, folder_spec)
+    return any(fnmatch.fnmatch(part, folder_spec) for part in candidate.parts)
 
 
 def _ancestor_dirs(rel_path: str) -> list[str]:

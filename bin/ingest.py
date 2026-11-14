@@ -630,7 +630,9 @@ def _render_phase(
     data_dir: Path,
     derived_dir: Path,
     manifest: dict[str, dict],
+    manifest_path: Path | None = None,
 ) -> int:
+    target_manifest = manifest_path or (derived_dir / "manifests" / "sync.json")
     render_failed = 0
     render_queue = [item for item in plan if item["needs_render"]]
     if not render_queue:
@@ -695,7 +697,7 @@ def _render_phase(
                 }
             )
             print(f"✗ render failed '{rel}': {exc}")
-    save_manifest(derived_dir / "manifests" / "sync.json", manifest)
+    save_manifest(target_manifest, manifest)
     return render_failed
 
 
@@ -823,6 +825,7 @@ def main() -> None:
     parser.add_argument("--no-images", action="store_true", help="disable the image pipeline")
     parser.add_argument("--no-office", action="store_true", help="disable the Office/ODF/EPUB pipeline")
     parser.add_argument("--no-audio", action="store_true", help="disable the audio/video pipeline")
+    parser.add_argument("--source-folder", help="optional custom source folder to ingest")
     args = parser.parse_args()
 
     env = global_env()
@@ -858,10 +861,16 @@ def main() -> None:
         sys.exit(f"KB '{args.kb}' not found.")
 
     ensure_kb_dirs(kb)
-    source_dir = Path(kb["source_dir"])
     data_dir = Path(kb["data_dir"])
     derived_dir = Path(kb["derived_dir"])
     port = kb["port"]
+    if args.source_folder:
+        source_dir = Path(args.source_folder).expanduser().resolve()
+        source_key = hashlib.sha256(str(source_dir).encode("utf-8")).hexdigest()[:16]
+        manifest_path = derived_dir / "manifests" / f"source_{source_key}.json"
+    else:
+        source_dir = Path(kb["source_dir"])
+        manifest_path = derived_dir / "manifests" / "sync.json"
     if not source_dir.is_dir():
         sys.exit(
             f"⚠ Source directory unavailable: {source_dir}\n"
@@ -878,7 +887,6 @@ def main() -> None:
 
     if args.force:
         clean_force_run(derived_dir)
-    manifest_path = derived_dir / "manifests" / "sync.json"
     manifest = {} if args.force else load_manifest(manifest_path)
 
     kb_docs = fetch_kb_docs(port)
@@ -951,7 +959,7 @@ def main() -> None:
 
     for category in _ordered_categories(plan):
         category_plan = [item for item in plan if item["category"] == category]
-        render_failed += _render_phase(category_plan, env, source_dir, data_dir, derived_dir, next_manifest)
+        render_failed += _render_phase(category_plan, env, source_dir, data_dir, derived_dir, next_manifest, manifest_path=manifest_path)
         inserted_added, inserted_updated, transient = _insert_phase(
             category_plan, port, data_dir, kb_docs, derived_dir, next_manifest
         )

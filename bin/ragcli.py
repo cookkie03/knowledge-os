@@ -53,6 +53,14 @@ from pipeline.dreaming import (
     remember_memory,
     run_dreaming_cycle,
 )
+from storage.inbox import (
+    consume_inbox,
+    get_inbox_dirs,
+    get_inbox_status,
+    load_inbox_jobs,
+    queue_inbox_send,
+    spawn_detached_job,
+)
 
 LINUX_SYSTEMD_UNITS = (
     "lightrag-server@.service",
@@ -628,7 +636,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             f"Run `ragcli stop {args.name}`, then `ragcli start {args.name}`, and retry."
         )
     write_kb_env(kb, env)
-    cmd = [str(engine_python), str(INGEST_SCRIPT), "--kb", args.name]
+    cmd = [str(engine_python), "-u", str(INGEST_SCRIPT), "--kb", args.name]
     if args.force:
         cmd.append("--force")
     if getattr(args, "pipelines", None):
@@ -636,7 +644,231 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     for cat in ("text", "pdf", "images", "office", "audio"):
         if getattr(args, f"no_{cat}", False):
             cmd.append(f"--no-{cat}")
-    sys.exit(subprocess.call(cmd, env=merged_runtime_env(kb, env)))
+    if getattr(args, "source_folder", None):
+        cmd.extend(["--source-folder", args.source_folder])
+
+    if getattr(args, "foreground", False) or getattr(args, "wait", False):
+        sys.exit(subprocess.call(cmd, env=merged_runtime_env(kb, env)))
+    log_path = Path(kb["data_dir"]) / "ingest.log"
+    pid = spawn_detached_job(cmd, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
+    print(f"Ingest avviato in background per '{args.name}' (PID: {pid}).")
+    print(f"Log: {log_path}")
+    print(f"Per monitorare: tail -f {log_path}")
+
+
+# Inbox management commands (send, consume, status)
+def cmd_inbox_send(args: argparse.Namespace) -> None:
+    env = global_env()
+    registry = load_registry(env)
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    source_path = Path(args.path).expanduser().resolve()
+    if not source_path.exists():
+        sys.exit(f"Percorso sorgente inesistente: {args.path}")
+
+    job = queue_inbox_send(kb, source_path=source_path)
+    print(f"File accodati per '{args.name}' [job: {job['job_id']}].")
+    print(f"File accettati: {job.get('file_count', 1)}")
+
+    if kb.get("link", {}).get("consume", True):
+        engine_python, _ = _ensure_runtime(env)
+        ragcli_script = ROOT / "bin" / "ragcli.py"
+        log_path = Path(kb["data_dir"]) / "inbox.log"
+        worker_cmd = [str(engine_python), str(ragcli_script), "_worker_consume", args.name]
+        spawn_detached_job(worker_cmd, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
+        print("Consumo automatico avviato in background.")
+    print(f"Stato: ragcli inbox status {args.name}")
+
+
+def cmd_inbox_consume(args: argparse.Namespace) -> None:
+    env = global_env()
+    registry = load_registry(env)
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    if _kb_server_state(kb) == "down":
+        sys.exit(f"Il server di '{args.name}' non è attivo. Avvialo prima con `ragcli start {args.name}`.")
+
+    engine_python, _ = _ensure_runtime(env)
+    ragcli_script = ROOT / "bin" / "ragcli.py"
+    log_path = Path(kb["data_dir"]) / "inbox.log"
+    worker_cmd = [str(engine_python), str(ragcli_script), "_worker_consume", args.name]
+    if getattr(args, "job", None):
+        worker_cmd.extend(["--job", args.job])
+    pid = spawn_detached_job(worker_cmd, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
+    print(f"Consumo inbox avviato in background per '{args.name}' (PID: {pid}).")
+    print(f"Log: {log_path}")
+    print(f"Stato: ragcli inbox status {args.name}")
+
+
+def cmd_inbox_status(args: argparse.Namespace) -> None:
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    status = get_inbox_status(kb)
+    if getattr(args, "json", False):
+        print(json.dumps(status, indent=2, ensure_ascii=False))
+        return
+    print(f"\nStato Inbox per '{args.name}':")
+    print(f"  Pending    (in attesa)     : {status['pending']}")
+    print(f"  Processing (in lavorazione): {status['processing']}")
+    print(f"  Processed  (completati)    : {status['processed']}")
+    print(f"  Failed     (falliti)       : {status['failed']}")
+    print(f"  Totale batch               : {status['total']}\n")
+
+
+# Source management commands (add, remove, list, ingest)
+def cmd_source_add(args: argparse.Namespace) -> None:
+    env = global_env()
+    registry = load_registry(env)
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    path = Path(args.path).expanduser().resolve()
+    if not path.is_dir():
+        sys.exit(f"Percorso non valido o non è una cartella: {args.path}")
+    sources = kb.setdefault("sources", [])
+    path_str = str(path)
+    if path_str in sources:
+        print(f"Sorgente '{path_str}' già collegata a '{args.name}'.")
+        return
+    sources.append(path_str)
+    save_registry(registry)
+    print(f"Sorgente '{path_str}' aggiunta a '{args.name}'.")
+
+
+def cmd_source_rm(args: argparse.Namespace) -> None:
+    env = global_env()
+    registry = load_registry(env)
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    path = Path(args.path).expanduser().resolve()
+    path_str = str(path)
+    sources = kb.get("sources", [])
+    if path_str not in sources:
+        sys.exit(f"Sorgente '{path_str}' non trovata in '{args.name}'.")
+    sources.remove(path_str)
+    save_registry(registry)
+    print(f"Sorgente '{path_str}' rimossa da '{args.name}'.")
+
+
+def cmd_source_ls(args: argparse.Namespace) -> None:
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    sources = kb.get("sources", [])
+    if not sources:
+        print(f"Nessuna sorgente esterna collegata a '{args.name}'.")
+        print(f"Per aggiungerne una: ragcli source add {args.name} <cartella>")
+        return
+    print(f"\nSorgenti collegate a '{args.name}':")
+    for s in sources:
+        p = Path(s)
+        status_tag = "OK" if p.is_dir() else "NON RAGGIUNGIBILE"
+        print(f"  - [{status_tag}] {s}")
+    print()
+
+
+def cmd_source_ingest(args: argparse.Namespace) -> None:
+    env = global_env()
+    registry = load_registry(env)
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    if _kb_server_state(kb) == "down":
+        sys.exit(f"Server '{args.name}' non attivo. Avvialo prima con `ragcli start {args.name}`.")
+
+    all_sources = kb.get("sources", [])
+    target_sources = []
+    if getattr(args, "sources", None):
+        for s in args.sources:
+            p_str = str(Path(s).expanduser().resolve())
+            if p_str not in all_sources:
+                sys.exit(f"Sorgente '{p_str}' non è tra le sorgenti collegate di '{args.name}'. Aggiungila prima con `ragcli source add`.")
+            target_sources.append(p_str)
+    else:
+        target_sources = list(all_sources)
+
+    if not target_sources:
+        sys.exit(f"Nessuna sorgente collegata da sincronizzare per '{args.name}'. Aggiungi una sorgente con: ragcli source add {args.name} <cartella>")
+
+    engine_python, _ = _ensure_runtime(env)
+    log_path = Path(kb["data_dir"]) / "ingest.log"
+
+    for src in target_sources:
+        cmd = [str(engine_python), str(INGEST_SCRIPT), "--kb", args.name, "--source-folder", src]
+        if getattr(args, "force", False):
+            cmd.append("--force")
+        spawn_detached_job(cmd, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
+
+    print(f"Ingest di {len(target_sources)} sorgenti avviato in background per '{args.name}'.")
+    print(f"Log: {log_path}")
+
+
+# Link automation commands (on, off, status)
+def cmd_link_on(args: argparse.Namespace) -> None:
+    env = global_env()
+    registry = load_registry(env)
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    link = kb.setdefault("link", {"consume": True, "ingest": True})
+    if getattr(args, "consume", False):
+        link["consume"] = True
+    if getattr(args, "ingest", False):
+        link["ingest"] = True
+    if not getattr(args, "consume", False) and not getattr(args, "ingest", False):
+        link["consume"] = True
+        link["ingest"] = True
+    save_registry(registry)
+    print(f"Link ON per '{args.name}' -> consume: {link['consume']}, ingest: {link['ingest']}")
+
+
+def cmd_link_off(args: argparse.Namespace) -> None:
+    env = global_env()
+    registry = load_registry(env)
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    link = kb.setdefault("link", {"consume": True, "ingest": True})
+    if getattr(args, "consume", False):
+        link["consume"] = False
+    if getattr(args, "ingest", False):
+        link["ingest"] = False
+    if not getattr(args, "consume", False) and not getattr(args, "ingest", False):
+        link["consume"] = False
+        link["ingest"] = False
+    save_registry(registry)
+    print(f"Link OFF per '{args.name}' -> consume: {link['consume']}, ingest: {link['ingest']}")
+
+
+def cmd_link_status(args: argparse.Namespace) -> None:
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    link = kb.get("link", {"consume": True, "ingest": True})
+    sources = kb.get("sources", [])
+    inbox_st = get_inbox_status(kb)
+
+    print(f"\nStato Link per '{args.name}':")
+    print(f"  Consume automatico : {'ON' if link.get('consume') else 'OFF'}")
+    print(f"  Ingest automatico  : {'ON' if link.get('ingest') else 'OFF'}")
+    print(f"  Sorgenti collegate : {len(sources)}")
+    print(f"  Inbox pending      : {inbox_st['pending']} batch in attesa\n")
+
+
+def cmd_worker_consume(args: argparse.Namespace) -> None:
+    env = global_env()
+    registry = load_registry(env)
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    consume_inbox(kb, specific_job_id=getattr(args, "job", None), env=env)
 
 
 def cmd_move(args: argparse.Namespace) -> None:
@@ -1098,6 +1330,83 @@ def cmd_config_models(_args: argparse.Namespace) -> None:
     print(f"  Current engine: {env.get('DOCLING_ASR_ENGINE', 'whisper_turbo_native')} (Whisper only)")
 
 
+# Unified MCP authentication management commands.
+# Invariant: MCP_AUTH_TOKEN in config/global.env is the single source of truth
+# for FastMCP, local CLI, web connectors (Claude, ChatGPT, Grok, Gemini), and systemd.
+def _restart_mcp_service_if_active() -> None:
+    """Restart knowledge-mcp systemd user service if currently active."""
+    res = _systemctl_user("is-active", "--quiet", "knowledge-mcp.service")
+    if res.returncode == 0:
+        _systemctl_user("restart", "knowledge-mcp.service")
+        print("  -> Servizio systemd 'knowledge-mcp.service' riavviato con successo.")
+
+
+def _print_mcp_connector_help(token: str) -> None:
+    env = global_env()
+    host = env.get("MCP_BIND_HOST", "127.0.0.1")
+    port = env.get("MCP_BIND_PORT", "8743")
+    path = env.get("MCP_PATH", "/mcp")
+    url = f"http://{host}:{port}{path}"
+
+    print("\n" + "=" * 65)
+    print("      CONFIGURAZIONE CONNETTORI MCP (CLAUDE, CHATGPT, GROK, GEMINI)")
+    print("=" * 65)
+    print(f"Endpoint locale:    {url}")
+    print(f"Endpoint Tailscale: https://knowledge.tail0f7f67.ts.net{path}")
+    print("\nEsempi di configurazione autenticazione:")
+    print("1. Claude Web / ChatGPT Actions / Grok (Header Bearer):")
+    print(f"   Authorization: Bearer {token}")
+    print("\n2. Header personalizzato API Key:")
+    print(f"   X-API-Key: {token}")
+    print("\n3. URL diretto con Query Param (per client senza header custom):")
+    print(f"   https://knowledge.tail0f7f67.ts.net{path}?token={token}")
+    print("\n4. cURL / Test rapido:")
+    print(f'   curl -H "Authorization: Bearer {token}" https://knowledge.tail0f7f67.ts.net{path}')
+    print("=" * 65 + "\n")
+
+
+def cmd_auth_show(args: argparse.Namespace) -> None:
+    env = global_env()
+    token = env.get("MCP_AUTH_TOKEN", "").strip()
+    if not token:
+        print("Autenticazione MCP: DISABILITATA (accesso aperto a chiunque raggiunga la porta)")
+        print("Per impostare una password: ragcli auth set <password> oppure ragcli auth generate")
+        return
+
+    plain = getattr(args, "plain", False)
+    display_token = token if plain else (token[:4] + "*" * (len(token) - 8) + token[-4:] if len(token) > 8 else "****")
+    print("Autenticazione MCP: ABILITATA [ATTIVA]")
+    print(f"Password/Token unico: {display_token}")
+    if not plain:
+        print("(Usa `ragcli auth show --plain` per vederla in chiaro)")
+    _print_mcp_connector_help(token)
+
+
+def cmd_auth_set(args: argparse.Namespace) -> None:
+    token = args.password.strip()
+    if not token:
+        sys.exit("Errore: la password/token non può essere vuota. Per rimuoverla usa `ragcli auth clear`.")
+    upsert_global_env({"MCP_AUTH_TOKEN": token})
+    print(f"Password MCP centralizzata aggiornata in config/global.env.")
+    _restart_mcp_service_if_active()
+    _print_mcp_connector_help(token)
+
+
+def cmd_auth_generate(_args: argparse.Namespace) -> None:
+    import secrets
+    token = secrets.token_urlsafe(24)
+    upsert_global_env({"MCP_AUTH_TOKEN": token})
+    print("Generata nuova password crittografica sicura per MCP.")
+    print(f"Password/Token unico: {token}")
+    _restart_mcp_service_if_active()
+    _print_mcp_connector_help(token)
+
+
+def cmd_auth_clear(_args: argparse.Namespace) -> None:
+    upsert_global_env({"MCP_AUTH_TOKEN": ""})
+    print("Password MCP rimossa da config/global.env. L'accesso MCP è ora aperto.")
+    _restart_mcp_service_if_active()
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -1145,7 +1454,64 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--no-images", action="store_true", help="disable the image pipeline")
     ingest.add_argument("--no-office", action="store_true", help="disable the Office/ODF/EPUB pipeline")
     ingest.add_argument("--no-audio", action="store_true", help="disable the audio/video pipeline")
+    ingest.add_argument("--source-folder", help="ingest a registered external source path")
+    ingest.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
     ingest.set_defaults(func=cmd_ingest)
+
+    inbox = sub.add_parser("inbox", help="append-only inbox management")
+    inbox_sub = inbox.add_subparsers(dest="inbox_cmd", required=True)
+    inbox_send = inbox_sub.add_parser("send", help="queue a file or directory")
+    inbox_send.add_argument("name")
+    inbox_send.add_argument("path")
+    inbox_send.set_defaults(func=cmd_inbox_send)
+    inbox_consume = inbox_sub.add_parser("consume", help="process pending inbox batches in background")
+    inbox_consume.add_argument("name")
+    inbox_consume.add_argument("--job")
+    inbox_consume.set_defaults(func=cmd_inbox_consume)
+    inbox_status = inbox_sub.add_parser("status", help="show inbox queue status")
+    inbox_status.add_argument("name")
+    inbox_status.add_argument("--json", action="store_true")
+    inbox_status.set_defaults(func=cmd_inbox_status)
+
+    source = sub.add_parser("source", help="manage external source folders")
+    source_sub = source.add_subparsers(dest="source_cmd", required=True)
+    source_add = source_sub.add_parser("add", help="register an external folder")
+    source_add.add_argument("name")
+    source_add.add_argument("path")
+    source_add.set_defaults(func=cmd_source_add)
+    source_rm = source_sub.add_parser("remove", aliases=["rm"], help="unregister an external folder")
+    source_rm.add_argument("name")
+    source_rm.add_argument("path")
+    source_rm.set_defaults(func=cmd_source_rm)
+    source_ls = source_sub.add_parser("list", aliases=["ls"], help="list registered folders")
+    source_ls.add_argument("name")
+    source_ls.set_defaults(func=cmd_source_ls)
+    source_ingest = source_sub.add_parser("ingest", help="ingest registered folders in background")
+    source_ingest.add_argument("name")
+    source_ingest.add_argument("--sources", nargs="+")
+    source_ingest.add_argument("--force", action="store_true")
+    source_ingest.set_defaults(func=cmd_source_ingest)
+
+    link = sub.add_parser("link", help="control persistent automation")
+    link_sub = link.add_subparsers(dest="link_cmd", required=True)
+    link_on = link_sub.add_parser("on", help="enable consume and/or ingest automation")
+    link_on.add_argument("name")
+    link_on.add_argument("--consume", action="store_true")
+    link_on.add_argument("--ingest", action="store_true")
+    link_on.set_defaults(func=cmd_link_on)
+    link_off = link_sub.add_parser("off", help="disable consume and/or ingest automation")
+    link_off.add_argument("name")
+    link_off.add_argument("--consume", action="store_true")
+    link_off.add_argument("--ingest", action="store_true")
+    link_off.set_defaults(func=cmd_link_off)
+    link_status = link_sub.add_parser("status", help="show automation status")
+    link_status.add_argument("name")
+    link_status.set_defaults(func=cmd_link_status)
+
+    worker = sub.add_parser("_worker_consume", help=argparse.SUPPRESS)
+    worker.add_argument("name")
+    worker.add_argument("--job")
+    worker.set_defaults(func=cmd_worker_consume)
 
     exclude_help = (
         "Pattern glob stile fnmatch.\n"
@@ -1218,6 +1584,25 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_rm.add_argument("name")
     mcp_rm.add_argument("--client", choices=list(mcp_clients.REMOVERS) + ["all"], default="claude-code")
     mcp_rm.set_defaults(func=cmd_mcp_rm)
+
+    # Dedicated unified auth subcommand for MCP
+    auth = sub.add_parser("auth", help="gestione centralizzata della password/token di protezione MCP")
+    auth_sub = auth.add_subparsers(dest="auth_cmd")
+    auth.set_defaults(func=cmd_auth_show)
+
+    auth_show = auth_sub.add_parser("show", help="mostra stato e password MCP")
+    auth_show.add_argument("--plain", action="store_true", help="mostra la password in chiaro")
+    auth_show.set_defaults(func=cmd_auth_show)
+
+    auth_set = auth_sub.add_parser("set", help="imposta una password per proteggere l'MCP online")
+    auth_set.add_argument("password", help="la password/token da impostare")
+    auth_set.set_defaults(func=cmd_auth_set)
+
+    auth_gen = auth_sub.add_parser("generate", help="genera una password crittografica sicura per l'MCP")
+    auth_gen.set_defaults(func=cmd_auth_generate)
+
+    auth_clear = auth_sub.add_parser("clear", help="rimuove la password (accesso libero)")
+    auth_clear.set_defaults(func=cmd_auth_clear)
 
     move = sub.add_parser("move", help="move data_dir between source path and local repo")
     move.add_argument("name")

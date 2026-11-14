@@ -131,8 +131,11 @@ cd knowledge-os
 # 2. Run automated bootstrap
 ./setup.sh
 
-# 3. Verify runtime health
+# 3. Verify runtime health and services
 ragcli doctor
+ragcli service status
+# Manage remote exposure if needed
+tailscale funnel
 ```
 
 The bootstrap script provisions `.venv`, installs all core dependencies (Docling, FastMCP, LightRAG API runtime), creates central CLI symlinks in `~/.local/bin`, and synchronizes default configuration.
