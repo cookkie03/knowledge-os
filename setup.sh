@@ -10,11 +10,8 @@ OS_NAME="$(uname -s)"
 BIN_DIR="$HOME/.local/bin"
 VENV_DIR="$REPO_DIR/.venv"
 ENGINE_PY="$VENV_DIR/bin/python"
-SHIM_DIR="$REPO_DIR/services/obsidian-mcp-oauth-shim"
 GLOBAL_ENV="$REPO_DIR/config/global.env"
 GLOBAL_EXAMPLE="$REPO_DIR/config/global.env.example"
-SHIM_ENV="$SHIM_DIR/.env"
-SHIM_EXAMPLE="$SHIM_DIR/.env.example"
 
 upsert_env_var() {
   local file="$1"
@@ -247,22 +244,10 @@ if [ -z "$SHIM_PUBLIC_URL" ] || [ "$SHIM_PUBLIC_URL" = "https://your-node.your-t
   fi
 fi
 
-SHIM_BIND_HOST="$(read_env_var "$GLOBAL_ENV" "SHIM_BIND_HOST")"
-SHIM_BIND_PORT="$(read_env_var "$GLOBAL_ENV" "SHIM_BIND_PORT")"
 MCP_BIND_HOST="$(read_env_var "$GLOBAL_ENV" "MCP_BIND_HOST")"
 MCP_BIND_PORT="$(read_env_var "$GLOBAL_ENV" "MCP_BIND_PORT")"
 MCP_PATH="$(read_env_var "$GLOBAL_ENV" "MCP_PATH")"
 PUBLIC_MCP_KB="$(read_env_var "$GLOBAL_ENV" "PUBLIC_MCP_KB")"
-PUBLISH_READY=0
-
-upsert_env_var "$SHIM_ENV" "SHIM_BIND_HOST" "${SHIM_BIND_HOST:-127.0.0.1}"
-upsert_env_var "$SHIM_ENV" "SHIM_BIND_PORT" "${SHIM_BIND_PORT:-8420}"
-upsert_env_var "$SHIM_ENV" "PORT" "${SHIM_BIND_PORT:-8420}"
-upsert_env_var "$SHIM_ENV" "LIGHTRAG_MCP_URL" "http://${MCP_BIND_HOST:-127.0.0.1}:${MCP_BIND_PORT:-8743}${MCP_PATH:-/mcp}"
-upsert_env_var "$SHIM_ENV" "LIGHTRAG_MCP_VERIFY_SSL" "false"
-if [ -n "$SHIM_PUBLIC_URL" ]; then
-  upsert_env_var "$SHIM_ENV" "ISSUER_URL" "$SHIM_PUBLIC_URL"
-fi
 
 LLM_PROVIDER="$(read_env_var "$GLOBAL_ENV" "LLM_PROVIDER")"
 LLM_MODEL="$(read_env_var "$GLOBAL_ENV" "LLM_MODEL")"
@@ -281,6 +266,7 @@ if [ "$OS_NAME" = "Linux" ]; then
     systemctl --user enable --now lightrag-dreaming.timer
   fi
 
+  PUBLISH_READY=0
   if [ -n "${PUBLIC_MCP_KB:-}" ]; then
     if kb_exists "$PUBLIC_MCP_KB"; then
       echo "==> Preparing env and services for public KB '$PUBLIC_MCP_KB'"
@@ -288,27 +274,22 @@ if [ "$OS_NAME" = "Linux" ]; then
       systemctl --user enable --now "lightrag-server@${PUBLIC_MCP_KB}.service"
       systemctl --user enable --now "lightrag-watchdog@${PUBLIC_MCP_KB}.service"
       systemctl --user enable --now "lightrag-mcp@${PUBLIC_MCP_KB}.service"
-      systemctl --user enable --now obsidian-mcp-oauth-shim.service
       PUBLISH_READY=1
     else
       echo "    PUBLIC_MCP_KB='$PUBLIC_MCP_KB' not found in registry: skipping public services startup"
     fi
   else
-    echo "    PUBLIC_MCP_KB not configured: installing units only without starting public MCP and shim"
+    echo "    PUBLIC_MCP_KB not configured: installing units only without starting public MCP"
   fi
 
   if [ "$PUBLISH_READY" -eq 1 ] && command -v tailscale >/dev/null 2>&1; then
-    echo "==> Configuring Tailscale publish for shim"
-    tailscale serve --bg "${TAILSCALE_FUNNEL_PORT:-8443}" "http://${SHIM_BIND_HOST:-127.0.0.1}:${SHIM_BIND_PORT:-8420}"
+    echo "==> Configuring Tailscale publish for MCP"
+    tailscale serve --bg "${TAILSCALE_FUNNEL_PORT:-8443}" "http://${MCP_BIND_HOST:-127.0.0.1}:${MCP_BIND_PORT:-8743}"
     tailscale funnel --bg "${TAILSCALE_FUNNEL_PORT:-8443}"
     tailscale funnel status || true
-  elif [ "$PUBLISH_READY" -eq 1 ]; then
-    echo "    Tailscale not found: skipping public shim publish"
-  else
-    echo "    Tailscale publish not configured because public MCP backend was not started"
   fi
 else
-  echo "==> Non-Linux system: skipping systemd --user installation and Funnel"
+  echo "==> Non-Linux system: skipping systemd --user installation"
 fi
 
 echo "==> Final verification"
@@ -318,8 +299,3 @@ echo "==> Setup completed."
 echo "    Useful commands:"
 echo "      ragcli doctor"
 echo "      ragcli service status"
-if [ "$PUBLISH_READY" -eq 1 ] && [ -n "${SHIM_PUBLIC_URL:-}" ]; then
-  echo "      Public shim URL: $SHIM_PUBLIC_URL/mcp"
-elif [ -n "${SHIM_PUBLIC_URL:-}" ]; then
-  echo "      Configured shim URL (not published): $SHIM_PUBLIC_URL/mcp"
-fi

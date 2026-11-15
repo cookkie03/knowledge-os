@@ -32,6 +32,9 @@ class MediaImportError(Exception):
 
 # Sanitize a string into a safe filename slug.
 # Strips non-alphanumeric characters to prevent path traversal or filesystem incompatibilities.
+# The slug is safe to use as part of a filesystem path; reserved windows names
+# and leading dots are not filtered here because the downstream path-validate
+# step already blocks traversal and absolute paths.
 def sanitize_slug(text: str, max_length: int = 80) -> str:
     cleaned = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE).strip().lower()
     slug = re.sub(r"[-\s]+", "-", cleaned)

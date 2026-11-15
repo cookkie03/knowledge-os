@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# KnowledgeOS CLI Root Launcher
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+ROOT="$(cd "$(dirname "$SOURCE")" && pwd)"
+
+if [ -x "$ROOT/.venv/bin/python" ]; then
+  exec "$ROOT/.venv/bin/python" "$ROOT/src/cli/ragcli.py" "$@"
+fi
+exec python3 "$ROOT/src/cli/ragcli.py" "$@"

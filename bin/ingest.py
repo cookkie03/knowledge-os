@@ -24,63 +24,22 @@ from kb_registry import (
     normalize_exclude_specs_for_kb,
     path_is_excluded,
 )
-
-TEXT_EXT = {
-    ".md", ".markdown", ".txt", ".rst", ".org", ".tex", ".adoc", ".asciidoc",
-    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp", ".h", ".hpp",
-    ".cs", ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".scala", ".r",
-    ".sh", ".zsh", ".bash", ".fish", ".ps1", ".bat",
-    ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
-    ".xml", ".html", ".htm", ".sql", ".csv", ".tsv", ".log", ".diff", ".patch", ".rtf",
-}
-PDF_EXT = {".pdf"}
-IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"}
-OFFICE_EXT = {
-    ".docx", ".dotx", ".docm", ".dotm",
-    ".pptx", ".potx", ".ppsx", ".pptm", ".potm", ".ppsm",
-    ".xlsx", ".xlsm",
-    ".odt", ".ott", ".fodt", ".ods", ".ots", ".fods", ".odp", ".otp", ".fodp",
-    ".epub", ".eml", ".msg",
-}
-AUDIO_VIDEO_EXT = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".mp4", ".avi", ".mov"}
-ALL_EXT = TEXT_EXT | PDF_EXT | IMAGE_EXT | OFFICE_EXT | AUDIO_VIDEO_EXT
-
-LOCALE_MAP = {
-    "it": "it-IT",
-    "en": "en-US",
-    "fr": "fr-FR",
-    "de": "de-DE",
-    "es": "es-ES",
-    "pt": "pt-PT",
-    "nl": "nl-NL",
-}
-GARBLED_RANGES = (
-    (0x2700, 0x27BF),
-    (0x2580, 0x259F),
-    (0xE000, 0xF8FF),
-    (0x1F0A0, 0x1F0FF),
+from pipeline.parsers import (
+    ALL_SUPPORTED_EXT as ALL_EXT,
+    AUDIO_VIDEO_EXT,
+    GARBLED_RANGES,
+    IMAGE_EXT,
+    LOCALE_MAP,
+    OFFICE_EXT,
+    PDF_EXT,
+    TEXT_EXT,
+    compute_file_sha256 as file_hash,
+    looks_garbled as _looks_garbled,
 )
-
-
-def file_hash(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(65536), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _looks_garbled(text: str, threshold: float = 0.15) -> bool:
-    real_letters = sum(1 for char in text if char.isalpha())
-    garbled = sum(1 for char in text if any(lo <= ord(char) <= hi for lo, hi in GARBLED_RANGES))
-    total = real_letters + garbled
-    if total < 50:
-        return False
-    return (garbled / total) > threshold
 
 
 def _run_docling(py: str, code: str, timeout: int, label: str) -> str:

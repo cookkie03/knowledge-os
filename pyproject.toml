@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "knowledge-os"
+version = "0.2.0"
+description = "Local-first Semantic Knowledge Operating System & Agent Context Engine"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "KnowledgeOS Contributors" }
+]
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.scripts]
+ragcli = "cli.ragcli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -11,10 +11,12 @@ import sys
 import time
 from pathlib import Path
 
-# CLI scripts run from bin/, so expose the repository's Python packages.
+# CLI scripts run from bin/ or src/cli/, so expose the repository's Python packages.
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SRC = ROOT / "src"
+for p in (SRC, ROOT, ROOT / "bin", SRC / "cli", SRC / "mcp"):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 
 try:
     import requests
@@ -67,7 +69,6 @@ LINUX_SYSTEMD_UNITS = (
     "lightrag-server@.service",
     "lightrag-watchdog@.service",
     "lightrag-mcp@.service",
-    "obsidian-mcp-oauth-shim.service",
 )
 
 
@@ -107,7 +108,6 @@ def _status_linux_units(env: dict[str, str] | None = None) -> list[str]:
             f"lightrag-server@{public_kb}.service",
             f"lightrag-watchdog@{public_kb}.service",
             f"lightrag-mcp@{public_kb}.service",
-            "obsidian-mcp-oauth-shim.service",
         ]
     return list(LINUX_SYSTEMD_UNITS)
 
@@ -115,27 +115,22 @@ def _status_linux_units(env: dict[str, str] | None = None) -> list[str]:
 def _manageable_linux_units(env: dict[str, str] | None = None) -> list[str]:
     env = env or global_env()
     public_kb = _configured_public_kb(env)
-    units = ["obsidian-mcp-oauth-shim.service"]
+    units: list[str] = []
     if public_kb:
         units = [
             f"lightrag-server@{public_kb}.service",
             f"lightrag-watchdog@{public_kb}.service",
             f"lightrag-mcp@{public_kb}.service",
-            *units,
         ]
     return units
 
 
 def _unit_template_context(repo_root: Path, home: Path, env: dict[str, str]) -> dict[str, str]:
-    shim_workdir = repo_root / "services" / "obsidian-mcp-oauth-shim"
-    shim_env_file = shim_workdir / ".env"
     return {
         "__REPO_ROOT__": str(repo_root),
         "__ENGINE_PYTHON__": env["ENGINE_PYTHON"],
         "__LIGHTRAG_SERVER_BIN__": env["LIGHTRAG_SERVER_BIN"],
         "__HOME__": str(home),
-        "__SHIM_WORKDIR__": str(shim_workdir),
-        "__SHIM_ENV_FILE__": str(shim_env_file),
     }
 
 
@@ -146,11 +141,14 @@ def install_user_units(repo_root: Path, home: Path, env: dict[str, str] | None =
     context = _unit_template_context(repo_root, home, env)
     installed: list[Path] = []
     unit_names = list(LINUX_SYSTEMD_UNITS)
+    src_dir = repo_root / "deploy" / "systemd"
+    if not src_dir.is_dir():
+        src_dir = repo_root / "systemd"
     for optional in ("lightrag-dreaming.service", "lightrag-dreaming.timer"):
-        if (repo_root / "systemd" / optional).is_file():
+        if (src_dir / optional).is_file():
             unit_names.append(optional)
     for name in unit_names:
-        src = repo_root / "systemd" / name
+        src = src_dir / name
         text = src.read_text()
         for token, value in context.items():
             text = text.replace(token, value)

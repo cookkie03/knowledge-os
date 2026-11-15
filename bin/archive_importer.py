@@ -29,16 +29,25 @@ class ArchiveSecurityError(RuntimeError):
 
 
 # Check destination containment to block directory traversal / Zip-Slip attacks.
+# Invariant: the resolved destination must always be a descendant of the
+# resolved target directory; this prevents a Zip-Slip attack where a filename
+# like "../../../etc/passwd" causes extraction outside the intended folder.
 def _is_safe_extraction_path(target_dir: Path, dest_path: Path) -> bool:
     try:
         resolved_target = target_dir.resolve()
         resolved_dest = dest_path.resolve()
+        # commonpath raises ValueError if the paths are on different drives;
+        # catch it and return False so unsafe entries are rejected.
         return os.path.commonpath([str(resolved_target), str(resolved_dest)]) == str(resolved_target)
     except (ValueError, OSError):
         return False
 
 
 # Unpack a zip archive strictly inside target_dir with decompression and path guards.
+# All safety checks are intentional blockers: symlinks, traversal, absolute
+# paths, size limits, total byte limits, and unsafe compression ratios defend
+# against Zip-Slip, zip bombs, and path traversal. Each guard raises
+# ArchiveSecurityError on violation so the caller knows exactly what failed.
 def safe_extract_zip(zip_path: Path | str, target_dir: Path | str) -> list[Path]:
     zip_path = Path(zip_path).resolve()
     target_dir = Path(target_dir).resolve()
@@ -59,13 +68,20 @@ def safe_extract_zip(zip_path: Path | str, target_dir: Path | str) -> list[Path]
                 raise ArchiveSecurityError(f"Symlinks are forbidden in archive: {info.filename}")
 
             filename = info.filename
+            # Block relative traversal components ('..') at any path segment;
+            # prevents a Zip-Slip attack via crafted archive entries.
             if ".." in filename.split("/") or ".." in filename.split("\\"):
                 raise ArchiveSecurityError(f"Relative traversal ('..') detected in entry: {filename}")
 
+            # Reject entries that would be written with an absolute path; that
+            # would overwrite arbitrary filesystem locations.
             if filename.startswith("/") or filename.startswith("\\"):
                 raise ArchiveSecurityError(f"Absolute path entry detected in archive: {filename}")
 
-            # Verify size bounds and compression ratio.
+            # Verify size bounds and compression ratio: MAX_FILE_SIZE_BYTES limits
+            # individual files, MAX_TOTAL_EXTRACTED_BYTES limits the whole archive,
+            # and MAX_COMPRESSION_RATIO defends against zip bombs where a small
+            # compressed file expands to many gigabytes.
             if info.file_size > MAX_FILE_SIZE_BYTES:
                 raise ArchiveSecurityError(
                     f"File {filename} exceeds max size limit ({info.file_size} > {MAX_FILE_SIZE_BYTES})"
@@ -83,6 +99,8 @@ def safe_extract_zip(zip_path: Path | str, target_dir: Path | str) -> list[Path]
                     raise ArchiveSecurityError(f"Compression ratio too high ({ratio:.1f}) for entry: {filename}")
 
             dest = target_dir / filename
+            # Final containment check: the resolved destination must be under the
+            # resolved target directory; if not, a Zip-Slip attack is detected.
             if not _is_safe_extraction_path(target_dir, dest):
                 raise ArchiveSecurityError(f"Zip-Slip attempt detected: {filename}")
 

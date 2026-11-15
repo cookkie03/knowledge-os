@@ -5,11 +5,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+SRC_DIR = ROOT / "src"
+CLI_DIR = SRC_DIR / "cli"
+MCP_DIR = SRC_DIR / "mcp"
 BIN_DIR = ROOT / "bin"
-SHIM_ROOT = ROOT / "services" / "obsidian-mcp-oauth-shim"
 
-if str(BIN_DIR) not in sys.path:
-    sys.path.insert(0, str(BIN_DIR))
-
-if str(SHIM_ROOT) not in sys.path:
-    sys.path.insert(0, str(SHIM_ROOT))
+for path in (SRC_DIR, CLI_DIR, MCP_DIR, ROOT, BIN_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))

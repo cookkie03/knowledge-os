@@ -148,6 +148,9 @@ def is_relative_to(path: Path, parent: Path) -> bool:
 # Build a normalized KB configuration dictionary.
 # Invariant: Each KB holds configuration for its directories, network port,
 # exclusion patterns, linked sources, and background link automation toggles.
+# The returned dict is used as the authoritative KB configuration; all pipeline
+# components read from this dict so there is a single source of truth for KB
+# parameters such as port, exclude patterns, and linkage settings.
 def create_kb_entry(name: str, source_dir: str, data_dir: str, derived_dir: str, rag_storage: str,
                     port: int, exclude: list[str] | None = None,
                     sources: list[str] | None = None,

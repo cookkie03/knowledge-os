@@ -79,7 +79,6 @@
 - **Atomic Persistence**: Zero external DB dependencies (no SQLite/Postgres/Neo4j servers required). State lives in isolated JSON manifests guarded by POSIX file locks (`fcntl.flock`) and atomic staging replacement (`os.replace`).
 - **Path Traversal Immunity**: Strict canonicalization and root confinement for all ingested paths.
 - **Systemd Daemonization**: Complete Linux service templates for background server lifecycle, automated watchdogs, and background dreamers.
-- **Remote Mobile Access**: Built-in FastAPI OAuth 2.0 authorization shim with Dynamic Client Registration (DCR) and PKCE, designed for secure exposure over Tailscale Funnel.
 
 ---
 
@@ -87,29 +86,21 @@
 
 ```text
 knowledge-os/
-├── bin/
-│   ├── ragcli.py             # Unified Control Plane CLI
-│   ├── kb_registry.py        # Multi-KB registry & metadata manager
-│   ├── ingest.py             # Multimodal batch ingestion coordinator
-│   ├── archive_importer.py   # ChatGPT/Claude archive memory extractor
-│   ├── agent_hooks.py        # Context injection hooks for AI sessions
-│   └── mcp_clients.py        # Automated MCP registration for IDE agents
-├── pipeline/
-│   ├── indexer.py            # Conflict-safe transactional indexing engine
-│   ├── ingestion_worker.py   # Staged background ingestion & safety gates
-│   ├── parsers.py            # Docling & Whisper multimodal extraction
-│   └── dreaming.py           # Memory consolidation & synthesis engine
-├── storage/
-│   ├── catalog.py            # Content-addressable document occurrence catalog
-│   └── json_store.py         # Thread/process-safe atomic JSON storage
-├── mcp/
-│   ├── kb_router.py          # Central Multi-KB FastMCP server
-│   └── lightrag_mcp.py       # Dedicated per-KB legacy MCP server
-├── services/
-│   └── obsidian-mcp-oauth-shim/ # OAuth2 + PKCE proxy for remote access
-├── systemd/                  # User systemd service templates & timers
+├── knowledge/                # User document drop folder (knowledge/default/)
 ├── config/                   # Global runtime and model configurations
-└── tests/                    # Comprehensive unit and integration test suite
+├── docs/                     # Guides, architecture docs, and domain GLOSSARY.md
+├── deploy/
+│   └── systemd/              # User systemd service templates & timers
+├── src/                      # Clean application package
+│   ├── cli/                  # Unified Control Plane CLI & agent hooks
+│   ├── pipeline/             # Conflict-safe indexer, parsers & dreaming
+│   ├── storage/              # Content-addressable catalog & atomic JSON store
+│   ├── mcp/                  # Multi-KB FastMCP servers
+│   └── sync/                 # Filesystem snapshot & delta sync engine
+├── tests/                    # Comprehensive unit and integration test suite
+├── ragcli                    # Executable root CLI launcher
+├── pyproject.toml            # Python standard package configuration
+└── setup.sh                  # One-click bootstrap script
 ```
 
 ---

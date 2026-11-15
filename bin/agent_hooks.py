@@ -243,6 +243,7 @@ def install_client_hook(
     }
 
 
+# Parse CLI arguments and dispatch memory hook actions (inject, capture, install).
 def main() -> None:
     parser = argparse.ArgumentParser(description="Agent Hooks for Memory Injection and Capture")
     subparsers = parser.add_subparsers(dest="action")

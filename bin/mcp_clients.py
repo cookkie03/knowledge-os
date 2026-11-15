@@ -15,6 +15,11 @@ from pathlib import Path
 CLAUDE_DESKTOP_CONFIG = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
 ANTIGRAVITY_CONFIG = Path.home() / ".gemini" / "config" / "mcp_config.json"
 
+# Dispatch table mapping client names to their registration functions.
+# Invariant: every key here must also have an entry in REMOVERS so that
+# `ragcli mcp add --client all` and `ragcli mcp rm --client all` operate symmetrically.
+CLIENTS: dict  # defined after all add_* functions
+
 
 # Construct the standard MCP command and argument dictionary for the lightrag server.
 def _server_entry(python: Path, script: Path, kb_name: str) -> dict:

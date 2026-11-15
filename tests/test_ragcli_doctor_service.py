@@ -12,8 +12,8 @@ def test_service_parser_accepts_status_restart_logs() -> None:
     parser = ragcli.build_parser()
 
     status_args = parser.parse_args(["service", "status"])
-    restart_args = parser.parse_args(["service", "restart", "obsidian-mcp-oauth-shim"])
-    logs_args = parser.parse_args(["service", "logs", "obsidian-mcp-oauth-shim"])
+    restart_args = parser.parse_args(["service", "restart", "lightrag-mcp@.service"])
+    logs_args = parser.parse_args(["service", "logs", "lightrag-mcp@.service"])
 
     assert status_args.service_cmd == "status"
     assert restart_args.service_cmd == "restart"
@@ -94,7 +94,7 @@ def test_service_status_uses_systemctl_user(
 
     monkeypatch.setattr(ragcli.subprocess, "run", fake_run)
 
-    ragcli.cmd_service_status(SimpleNamespace(name="obsidian-mcp-oauth-shim.service"))
+    ragcli.cmd_service_status(SimpleNamespace(name="lightrag-server@second-brain.service"))
 
     assert calls[0][:2] == ["systemctl", "--user"]
     assert "active" in capsys.readouterr().out
@@ -124,7 +124,6 @@ def test_service_status_reports_installed_templates_when_no_public_kb(
     assert "lightrag-server@.service: installed" in output
     assert "lightrag-watchdog@.service: installed" in output
     assert "lightrag-mcp@.service: installed" in output
-    assert "obsidian-mcp-oauth-shim.service: active" in output
 
 
 def test_service_restart_uses_systemctl_user_for_specific_unit(
@@ -139,10 +138,10 @@ def test_service_restart_uses_systemctl_user_for_specific_unit(
 
     monkeypatch.setattr(ragcli.subprocess, "run", fake_run)
 
-    ragcli.cmd_service_restart(SimpleNamespace(name="obsidian-mcp-oauth-shim.service"))
+    ragcli.cmd_service_restart(SimpleNamespace(name="lightrag-mcp@.service"))
 
-    assert calls == [["systemctl", "--user", "restart", "obsidian-mcp-oauth-shim.service"]]
-    assert "restarted obsidian-mcp-oauth-shim.service" in capsys.readouterr().out
+    assert calls == [["systemctl", "--user", "restart", "lightrag-mcp@.service"]]
+    assert "restarted lightrag-mcp@.service" in capsys.readouterr().out
 
 
 def test_service_install_units_writes_repo_specific_paths(
@@ -153,7 +152,6 @@ def test_service_install_units_writes_repo_specific_paths(
     repo_root = tmp_path / "repo"
     systemd_src = repo_root / "systemd"
     systemd_src.mkdir(parents=True)
-    (systemd_src / "obsidian-mcp-oauth-shim.service").write_text("WorkingDirectory=__REPO_ROOT__\nExecStart=__ENGINE_PYTHON__\n")
     (systemd_src / "lightrag-server@.service").write_text("ExecStart=__LIGHTRAG_SERVER_BIN__\n")
     (systemd_src / "lightrag-watchdog@.service").write_text("home=__HOME__\n")
     (systemd_src / "lightrag-mcp@.service").write_text("ExecStart=__ENGINE_PYTHON__ __REPO_ROOT__/mcp/lightrag_mcp.py\n")
@@ -166,15 +164,13 @@ def test_service_install_units_writes_repo_specific_paths(
         env={
             "ENGINE_PYTHON": str(repo_root / ".venv/bin/python"),
             "LIGHTRAG_SERVER_BIN": str(repo_root / ".venv/bin/lightrag-server"),
-            "SHIM_BIND_HOST": "127.0.0.1",
-            "SHIM_BIND_PORT": "8420",
         },
     )
 
-    assert len(installed) == 4
-    shim_unit = (home / ".config" / "systemd" / "user" / "obsidian-mcp-oauth-shim.service").read_text()
-    assert str(repo_root) in shim_unit
-    assert "__REPO_ROOT__" not in shim_unit
+    assert len(installed) == 3
+    server_unit = (home / ".config" / "systemd" / "user" / "lightrag-server@.service").read_text()
+    assert str(repo_root / ".venv/bin/lightrag-server") in server_unit
+    assert "__LIGHTRAG_SERVER_BIN__" not in server_unit
 
     monkeypatch.setattr(ragcli, "install_user_units", lambda *_args, **_kwargs: installed)
     monkeypatch.setattr(ragcli, "global_env", lambda: {"ENGINE_PYTHON": "x", "LIGHTRAG_SERVER_BIN": "y"})
@@ -205,11 +201,11 @@ def test_doctor_reports_service_status_lines(monkeypatch: pytest.MonkeyPatch) ->
 
     report = ragcli._doctor_report()
 
-    service_row = next(item for item in report if item["name"] == "obsidian-mcp-oauth-shim.service")
+    service_row = next(item for item in report if item["name"] == "lightrag-server@.service")
     assert service_row == {
-        "name": "obsidian-mcp-oauth-shim.service",
+        "name": "lightrag-server@.service",
         "ok": True,
-        "details": "active",
+        "details": "installed",
     }
 
 
@@ -223,7 +219,6 @@ def test_status_units_expand_public_kb_instances(monkeypatch: pytest.MonkeyPatch
         "lightrag-server@second-brain.service",
         "lightrag-watchdog@second-brain.service",
         "lightrag-mcp@second-brain.service",
-        "obsidian-mcp-oauth-shim.service",
     ]
 
 
