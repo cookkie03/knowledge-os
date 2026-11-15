@@ -36,6 +36,13 @@ from kb_registry import find_kb, global_env, load_registry
 from pipeline.parsers import SafePathError, validate_safe_relative_path
 
 logger = logging.getLogger("storage.inbox")
+if not logger.handlers:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(
+        logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    )
+    logger.addHandler(_handler)
+logger.setLevel(logging.INFO)
 
 
 def utc_now_iso() -> str:
@@ -281,6 +288,8 @@ def consume_inbox(
         )
 
     results: list[dict[str, Any]] = []
+    if batches_to_run:
+        logger.info(f"Starting inbox consume for '{kb.get('name')}' ({len(batches_to_run)} batch(es) queued)")
 
     for batch in batches_to_run:
         job_id = batch.name
@@ -293,6 +302,7 @@ def consume_inbox(
             logger.warning(f"Could not lock batch {job_id} for processing: {exc}")
             continue
 
+        logger.info(f"Processing inbox batch '{job_id}'")
         update_inbox_job(kb, job_id, {
             "status": "processing",
             "started_at": utc_now_iso(),
@@ -350,6 +360,7 @@ def consume_inbox(
                     "errors": errors,
                     "processed_count": len(processed_files),
                 })
+                logger.error(f"Failed inbox batch '{job_id}' with {len(errors)} error(s)")
                 results.append(rec)
             else:
                 # Success branch: move to processed/
@@ -363,6 +374,7 @@ def consume_inbox(
                     "processed_count": len(processed_files),
                     "files": processed_files,
                 })
+                logger.info(f"Completed inbox batch '{job_id}' ({len(processed_files)} file(s) processed)")
                 results.append(rec)
 
         except Exception as unhandled_exc:
@@ -386,8 +398,11 @@ def consume_inbox(
                 "completed_at": utc_now_iso(),
                 "error": str(unhandled_exc),
             })
+            logger.error(f"Unhandled exception processing inbox batch '{job_id}': {unhandled_exc}")
             results.append(rec)
 
+    if batches_to_run:
+        logger.info(f"Inbox consume completed for '{kb.get('name')}': {len(results)} batch(es) processed")
     return {"processed_batches": len(results), "jobs": results}
 
 
@@ -422,7 +437,10 @@ def spawn_detached_job(
     log_file.parent.mkdir(parents=True, exist_ok=True)
     spawn_env = (env.copy() if env else os.environ.copy())
     spawn_env["PYTHONUNBUFFERED"] = "1"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with log_file.open("ab") as out:
+        out.write(f"[{now_str}] === Starting detached job: {' '.join(cmd)} ===\n".encode("utf-8"))
+        out.flush()
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
@@ -432,4 +450,7 @@ def spawn_detached_job(
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
+        out.write(f"[{now_str}] === Detached job running with PID {proc.pid} ===\n".encode("utf-8"))
+        out.flush()
+    return proc.pid
     return proc.pid

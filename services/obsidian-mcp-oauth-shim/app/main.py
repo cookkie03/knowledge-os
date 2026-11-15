@@ -10,7 +10,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 
 from . import config, db, security
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 log = logging.getLogger("obsidian-mcp-oauth-shim")
 
 HOP_BY_HOP = {"connection", "content-length", "transfer-encoding", "keep-alive", "upgrade"}

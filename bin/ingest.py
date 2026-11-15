@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -94,11 +95,23 @@ def _is_mps_unsupported(error: Exception) -> bool:
     return "AcceleratorDeviceNotAvailableError" in text and "MPS is not supported" in text
 
 
+# Format a log message with a local timestamp for log file auditing and real-time monitoring.
+def _log_print(msg: str = "") -> None:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if msg.startswith("\n"):
+        print(f"\n[{now}] {msg[1:]}")
+    elif msg:
+        print(f"[{now}] {msg}")
+    else:
+        print()
+
+
+# Emit a timestamped event line to stdout for sync/ingest monitoring.
 def _log(prefix: str, rel: str, detail: str | None = None) -> None:
     if detail:
-        print(f"{prefix} {rel} — {detail}")
+        _log_print(f"{prefix} {rel} — {detail}")
     else:
-        print(f"{prefix} {rel}")
+        _log_print(f"{prefix} {rel}")
 
 
 def _manifest_entry(rel: str, path: Path, current_hash: str, category: str, old_entry: dict | None) -> dict:
@@ -193,7 +206,7 @@ def _classify_insert_failure(exc: Exception) -> str:
 
 
 def _phase_header(name: str, count: int) -> None:
-    print(f"\n[{name}] {count} file")
+    _log_print(f"\n[{name}] {count} file")
 
 
 def _docling_probe_text(path: Path, py: str, timeout: int) -> str:
@@ -348,7 +361,7 @@ def render_docling_visual(path: Path, env: dict[str, str]) -> str:
     except Exception as exc:
         if accelerator_device != "MPS" or not _is_mps_unsupported(exc):
             raise
-        print(f"    ⚠ Docling on {path.name}: MPS is not supported by this model, falling back to CPU")
+        _log_print(f"    ⚠ Docling on {path.name}: MPS is not supported by this model, falling back to CPU")
         return _run_docling(py, _code("CPU"), timeout, f"Docling visual (CPU fallback) on {path.name}")
 
 
@@ -449,7 +462,7 @@ def fetch_kb_docs(port: int, page_size: int = 50) -> dict[str, list[str]] | None
             response = requests.get(f"http://127.0.0.1:{port}/documents", timeout=60)
             response.raise_for_status()
         except Exception as exc:
-            print(f"  ⚠ unable to read KB documents ({exc}): mirror disabled for this run.")
+            _log_print(f"  ⚠ unable to read KB documents ({exc}): mirror disabled for this run.")
             return None
         statuses = response.json().get("statuses", {})
         for bucket in statuses.values():
@@ -473,7 +486,7 @@ def delete_docs(port: int, doc_ids: list[str]) -> bool:
         response.raise_for_status()
         return True
     except Exception as exc:
-        print(f"    ⚠ document deletion failed ({exc}); continuing.")
+        _log_print(f"    ⚠ document deletion failed ({exc}); continuing.")
         return False
 
 
@@ -495,7 +508,7 @@ def insert_text(port: int, text: str, source: str, retries: int = 8) -> str:
                 return "exists"
             wait = min(10 * 2 ** (attempt - 1), 300)
             if attempt <= retries:
-                print(f"    ⏳ pipeline busy (409) for {source}, retrying in {wait}s ({attempt}/{retries})…")
+                _log_print(f"    ⏳ pipeline busy (409) for {source}, retrying in {wait}s ({attempt}/{retries})…")
                 time.sleep(wait)
                 continue
         response.raise_for_status()
@@ -696,7 +709,7 @@ def _render_phase(
                     "last_error": str(exc),
                 }
             )
-            print(f"✗ render failed '{rel}': {exc}")
+            _log_print(f"✗ render failed '{rel}': {exc}")
     save_manifest(target_manifest, manifest)
     return render_failed
 
@@ -758,9 +771,9 @@ def _insert_phase(
             entry["last_error"] = str(exc)
             if status == "transient":
                 transient.append(item)
-                print(f"↻ insert pending '{rel}': {exc}")
+                _log_print(f"↻ insert pending '{rel}': {exc}")
             else:
-                print(f"✗ insert failed '{rel}': {exc}")
+                _log_print(f"✗ insert failed '{rel}': {exc}")
     save_manifest(derived_dir / "manifests" / "sync.json", manifest)
     return inserted_added, inserted_updated, transient
 
@@ -775,7 +788,7 @@ def _retry_transient_inserts(
 ) -> tuple[int, int]:
     if not transient:
         return 0, 0
-    print("\n[insert:retry] final pass for transient failures")
+    _log_print("\n[insert:retry] final pass for transient failures")
     time.sleep(5)
     added = updated = 0
     retry_queue = sorted(transient, key=lambda item: (_insert_priority(item["category"]), item["rel"]))
@@ -808,7 +821,7 @@ def _retry_transient_inserts(
         except Exception as exc:
             entry["insert_status"] = "failed"
             entry["last_error"] = str(exc)
-            print(f"✗ retry failed '{rel}': {exc}")
+            _log_print(f"✗ retry failed '{rel}': {exc}")
     save_manifest(derived_dir / "manifests" / "sync.json", manifest)
     return added, updated
 
@@ -852,8 +865,8 @@ def main() -> None:
 
     disabled_pipelines = all_categories - enabled_pipelines
     if disabled_pipelines:
-        print(f"Disabled pipelines: {', '.join(sorted(disabled_pipelines))}")
-    print(f"Enabled pipelines: {', '.join(sorted(enabled_pipelines))}")
+        _log_print(f"Disabled pipelines: {', '.join(sorted(disabled_pipelines))}")
+    _log_print(f"Enabled pipelines: {', '.join(sorted(enabled_pipelines))}")
 
     registry = load_registry(env)
     kb = find_kb(registry, args.kb)
@@ -902,7 +915,7 @@ def main() -> None:
     next_manifest: dict[str, dict] = {}
     plan: list[dict] = []
 
-    print(f"KB '{args.kb}': {len(candidates)} candidate files from source {source_dir}")
+    _log_print(f"KB '{args.kb}': {len(candidates)} candidate files from source {source_dir}")
     for path in candidates:
         rel = path.relative_to(source_dir).as_posix()
         present_rel.add(rel)
@@ -995,7 +1008,7 @@ def main() -> None:
                 artifact.unlink()
 
     save_manifest(manifest_path, next_manifest)
-    print(
+    _log_print(
         f"\nDone: {added} added, {updated} updated, {unchanged} unchanged, "
         f"{removed} removed, {render_failed} render failures, {insert_failed} insert failures."
     )

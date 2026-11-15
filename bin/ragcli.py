@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import os
 import shutil
@@ -548,7 +549,12 @@ def cmd_start(args: argparse.Namespace) -> None:
             f"Run `ragcli stop {args.name}` e poi rilancia `ragcli start {args.name}`."
         )
     log_path = Path(kb["data_dir"]) / "lightrag.log"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with log_path.open("ab") as log_handle:
+        log_handle.write(
+            f"[{now_str}] === Starting LightRAG server for '{kb['name']}' on port {kb['port']} ===\n".encode("utf-8")
+        )
+        log_handle.flush()
         subprocess.Popen(
             [
                 str(server_bin),
@@ -590,6 +596,17 @@ def cmd_stop(args: argparse.Namespace) -> None:
             f"Impossibile fermare '{args.name}' su :{kb['port']}. "
             f"Controlla manualmente il processo {port_pid(kb['port']) or '?'}.)"
         )
+    log_path = Path(kb["data_dir"]) / "lightrag.log"
+    if log_path.exists():
+        try:
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with log_path.open("ab") as log_handle:
+                log_handle.write(
+                    f"[{now_str}] === Stopped LightRAG server for '{kb['name']}' ===\n".encode("utf-8")
+                )
+                log_handle.flush()
+        except OSError:
+            pass
     print(f"Server '{args.name}' stopped.")
 
 

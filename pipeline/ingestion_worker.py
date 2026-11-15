@@ -49,7 +49,9 @@ from storage.catalog import Catalog
 logger = logging.getLogger("pipeline.ingestion_worker")
 if not logger.handlers:
     _handler = logging.StreamHandler(sys.stderr)
-    _handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
+    _handler.setFormatter(
+        logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    )
     logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
 

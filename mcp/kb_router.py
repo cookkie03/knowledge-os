@@ -54,7 +54,9 @@ from storage.inbox import get_inbox_status, queue_inbox_send, spawn_detached_job
 logger = logging.getLogger("mcp.kb_router")
 if not logger.handlers:
     _handler = logging.StreamHandler(sys.stderr)
-    _handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    _handler.setFormatter(
+        logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    )
     logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
 

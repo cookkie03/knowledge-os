@@ -7,7 +7,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RAGCLI="$SCRIPT_DIR/ragcli"
 
+LOG_FILE="/tmp/lightrag-second-brain-watchdog-loop.log"
+
 while true; do
-    "$RAGCLI" server start second-brain >>"/tmp/lightrag-second-brain-watchdog-loop.log" 2>&1
+    "$RAGCLI" server start second-brain 2>&1 | while IFS= read -r line; do
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $line"
+    done >>"$LOG_FILE"
     sleep 30
 done

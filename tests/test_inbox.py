@@ -43,3 +43,23 @@ def test_job_updates_are_atomic_and_readable(tmp_path):
     jobs = load_inbox_jobs(kb)
     assert jobs["jobs"]["job-1"]["status"] == "queued"
     assert json.loads((Path(kb["data_dir"]) / "inbox_jobs.json").read_text())["jobs"]
+
+
+def test_spawn_detached_job_writes_timestamps_to_log(tmp_path):
+    import re
+    from storage.inbox import spawn_detached_job
+
+    log_path = tmp_path / "test.log"
+    pid = spawn_detached_job(["python3", "-c", "print('hello from job')"], cwd=tmp_path, log_path=log_path)
+    assert pid > 0
+
+    import time
+    for _ in range(50):
+        if log_path.exists() and "hello from job" in log_path.read_text(encoding="utf-8"):
+            break
+        time.sleep(0.05)
+
+    content = log_path.read_text(encoding="utf-8")
+    assert "=== Starting detached job:" in content
+    assert "=== Detached job running with PID" in content
+    assert re.search(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]", content) is not None
