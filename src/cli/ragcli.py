@@ -21,18 +21,45 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised via monkeypatch in tests
     requests = None
 
+import mcp_clients
+
 from kb_manager import (
+    ALLOWED_CONTEXT_FIELDS,
+    KB_ROOT,
+    canonicalize_exclude_specs,
+    dir_is_excluded,
+    expand_exclude_specs,
+    find_kb,
     global_env,
-    ensure_kb_dirs,
+    is_relative_to,
     load_registry,
     next_port,
     save_registry,
     split_exclude_specs,
+    storage_mode,
     write_kb_env,
 )
-from mcp.router import KBRouter, build_mcp_server
+try:
+    from router import KBRouter, build_mcp_server
+except ImportError:
+    from mcp.router import KBRouter, build_mcp_server
 from memory_manager import remember_memory, query_memories, load_kb_memories, deprecate_memory_by_id
 from ingest_manager import run_ingest
+
+
+#
+# ── Centralized default configuration ──────────────────────────────────────────
+#
+
+
+# All default values live here — the CLI never sets its own defaults.
+# Each tool function owns its defaults; the parser merely passes them through.
+DEFAULT_GLOBAL_ENV: dict[str, str] = global_env()
+
+
+#
+# ── Helper / scaffolding ───────────────────────────────────────────────────────
+#
 
 
 def _normalize_service_name(name: str) -> str:
@@ -48,7 +75,8 @@ def _systemd_user_dir() -> Path:
     return Path.home() / ".config" / "systemd" / "user"
 
 
-def _configured_public_kb(env: dict[str, str]) -> str | None:
+def _configured_public_kb(env: dict[str, str] | None = None) -> str | None:
+    env = env or global_env()
     kb_name = env.get("PUBLIC_MCP_KB", "").strip()
     if not kb_name:
         return None
@@ -159,12 +187,10 @@ def _funnel_status(env: dict[str, str]) -> dict[str, object]:
             "ok": False,
             "details": public_url or "missing",
         }
-
     import shutil
     tailscale_bin = shutil.which("tailscale")
     if not tailscale_bin:
         return {"name": "funnel", "ok": False, "details": "tailscale not found"}
-
     result = subprocess.run([tailscale_bin, "funnel", "status"], capture_output=True, text=True)
     output = result.stdout.strip() or result.stderr.strip() or "unknown"
     public_port = env.get("TAILSCALE_FUNNEL_PORT", "8443")
@@ -289,7 +315,6 @@ def _ensure_runtime(env: dict[str, str]) -> tuple:
 
 
 def _wait_for_health(port: int, timeout: float = 30.0) -> bool:
-    import time
     started = time.time()
     while time.time() - started < timeout:
         if health(port):
@@ -308,7 +333,6 @@ def _wait_for_port_release(port: int, timeout: float = 10.0) -> bool:
 
 
 def _stop_server(kb: dict) -> bool:
-    import fcntl
     pid = port_pid(kb["port"])
     if not pid:
         return True
@@ -332,16 +356,15 @@ def _kb_server_state(kb: dict) -> str:
     return "down"
 
 
-# Attempt every client removal and collect failures instead of stopping early.
 def _deregister_all_mcp(kb: dict) -> list[str]:
-    from mcp.router import KBRouter
+    from router import KBRouter
     from kb_manager import load_registry
-
     mcp_name = f"lightrag-{kb['name']}"
     registry = load_registry(global_env())
     warnings: list[str] = []
     router = KBRouter(registry=registry)
-    for client, fn in ...:  # mcp_clients.REMOVERS items
+    import mcp_clients
+    for client, fn in mcp_clients.REMOVERS.items():
         try:
             rc = fn(mcp_name, Path(kb["source_dir"]))
         except Exception as exc:
@@ -352,7 +375,6 @@ def _deregister_all_mcp(kb: dict) -> list[str]:
     return warnings
 
 
-# Permit deletion only for the two recognized KB data directory locations.
 def _safe_kb_delete_target(kb: dict) -> Path:
     from pathlib import Path as P
     data_dir = P(kb["data_dir"]).resolve()
@@ -366,6 +388,11 @@ def _safe_kb_delete_target(kb: dict) -> Path:
         f"  - {source_data_dir}\n"
         f"  - {repo_data_dir}"
     )
+
+
+#
+# ── KB Management ──────────────────────────────────────────────────────────────
+#
 
 
 def cmd_add(args: argparse.Namespace) -> None:
@@ -383,7 +410,7 @@ def cmd_add(args: argparse.Namespace) -> None:
         "data_dir": str(data_dir),
         "derived_dir": str(data_dir / "derived"),
         "rag_storage": str(data_dir / "rag_storage"),
-        "port": args.port or next_port(registry, env),
+        "port": args.port if args.port is not None else next_port(registry, env),
         "exclude": [],
     }
     ensure_kb_dirs(kb)
@@ -397,6 +424,17 @@ def cmd_add(args: argparse.Namespace) -> None:
     print(f"  derived    : {kb['derived_dir']}")
     print(f"  porta      : {kb['port']}")
     print(f"\nProssimi passi:\n  ragcli start {args.name}\n  ragcli ingest {args.name}\n  ragcli mcp add {args.name}")
+
+
+def ensure_kb_dirs(kb: dict) -> None:
+    data_dir = Path(kb["data_dir"])
+    derived_dir = Path(kb["derived_dir"])
+    rag_storage = Path(kb["rag_storage"])
+    data_dir.mkdir(parents=True, exist_ok=True)
+    derived_dir.mkdir(parents=True, exist_ok=True)
+    rag_storage.mkdir(parents=True, exist_ok=True)
+    for subdir in ("text", "pdf", "images", "office", "audio", "cache", "manifests"):
+        (derived_dir / subdir).mkdir(parents=True, exist_ok=True)
 
 
 def cmd_list(_: argparse.Namespace) -> None:
@@ -474,7 +512,6 @@ def cmd_exclude_ls(args: argparse.Namespace) -> None:
     if not patterns:
         print(f"No exclusions defined for '{args.name}'.")
         return
-
     display_patterns = expand_exclude_specs(patterns, source_dir, data_dir) if args.expanded else patterns
     title = "Expanded exclusions" if args.expanded else "Exclusions"
     print(f"{title} for '{args.name}':")
@@ -483,10 +520,10 @@ def cmd_exclude_ls(args: argparse.Namespace) -> None:
 
 
 def _canonicalize_kb_excludes(kb: dict) -> bool:
-    from kb_manager import canonicalize_exclude_specs, normalize_exclude_specs_for_kb
-    canonical, changed = canonicalize_exclude_specs(kb.get("exclude", []))
+    from kb_manager import canonicalize_exclude_specs
+    canonical, _ = canonicalize_exclude_specs(kb.get("exclude", []))
     kb["exclude"] = canonical
-    return changed
+    return True
 
 
 def cmd_start(args: argparse.Namespace) -> None:
@@ -541,7 +578,6 @@ def cmd_start(args: argparse.Namespace) -> None:
     print(f"Server '{args.name}' attivo su http://127.0.0.1:{kb['port']}")
 
 
-# Need to import datetime and merged_runtime_env
 from datetime import datetime
 from kb_manager import merged_runtime_env
 
@@ -594,10 +630,11 @@ def cmd_remove(args: argparse.Namespace) -> None:
     print(f"KB '{args.name}' removed.")
     print(f"  source preserved: {kb['source_dir']}")
     print(f"  deleted state   : {delete_target}")
-    if ...:  # mcp_warnings
-        print("\nWarnings during MCP cleanup:")
-        for warning in ...:  # mcp_warnings
-            print(f"  - {warning}")
+
+
+#
+# ── Ingest ─────────────────────────────────────────────────────────────────────
+#
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
@@ -621,15 +658,15 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     cmd_list = [str(engine_python), str(INGEST_SCRIPT), "--kb", args.name]
     if args.force:
         cmd_list.append("--force")
-    if getattr(args, "pipelines", None):
+    if args.pipelines:
         cmd_list.extend(["--pipelines", args.pipelines])
     for cat in ("text", "pdf", "images", "office", "audio"):
         if getattr(args, f"no_{cat}", False):
             cmd_list.append(f"--no-{cat}")
-    if getattr(args, "source_folder", None):
+    if args.source_folder:
         cmd_list.extend(["--source-folder", args.source_folder])
 
-    if getattr(args, "foreground", False) or getattr(args, "wait", False):
+    if args.foreground or args.wait:
         sys.exit(subprocess.call(cmd_list, env=merged_runtime_env(kb, env)))
     log_path = Path(kb["data_dir"]) / "ingest.log"
     pid = subprocess.Popen(
@@ -644,7 +681,11 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     print(f"Per monitorare: tail -f {log_path}")
 
 
-# Inbox management commands (send, consume, status)
+#
+# ── Inbox management commands (send, consume, status) ──────────────────────────
+#
+
+
 def cmd_inbox_send(args: argparse.Namespace) -> None:
     env = global_env()
     registry = load_registry(env)
@@ -723,7 +764,11 @@ def cmd_inbox_status(args: argparse.Namespace) -> None:
     print(f"  Totale batch               : {status['total']}\n")
 
 
-# Source management commands (add, remove, list, ingest)
+#
+# ── Source management commands (add, remove, list, ingest) ─────────────────────
+#
+
+
 def cmd_source_add(args: argparse.Namespace) -> None:
     env = global_env()
     registry = load_registry(env)
@@ -788,7 +833,7 @@ def cmd_source_ingest(args: argparse.Namespace) -> None:
 
     all_sources = kb.get("sources", [])
     target_sources = []
-    if getattr(args, "sources", None):
+    if args.sources:
         for s in args.sources:
             p_str = str(Path(s).expanduser().resolve())
             if p_str not in all_sources:
@@ -805,7 +850,7 @@ def cmd_source_ingest(args: argparse.Namespace) -> None:
 
     for src in target_sources:
         cmd = [str(engine_python), str(INGEST_SCRIPT), "--kb", args.name, "--source-folder", src]
-        if getattr(args, "force", False):
+        if args.force:
             cmd.append("--force")
         subprocess.Popen(
             cmd,
@@ -819,7 +864,11 @@ def cmd_source_ingest(args: argparse.Namespace) -> None:
     print(f"Log: {log_path}")
 
 
-# Link automation commands (on, off, status)
+#
+# ── Link automation commands (on, off, status) ────────────────────────────────
+#
+
+
 def cmd_link_on(args: argparse.Namespace) -> None:
     env = global_env()
     registry = load_registry(env)
@@ -827,11 +876,11 @@ def cmd_link_on(args: argparse.Namespace) -> None:
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
     link = kb.setdefault("link", {"consume": True, "ingest": True})
-    if getattr(args, "consume", False):
-        link["consume"] = True
-    if getattr(args, "ingest", False):
-        link["ingest"] = True
-    if not getattr(args, "consume", False) and not getattr(args, "ingest", False):
+    if getattr(args, "consume", None) is not None:
+        link["consume"] = args.consume
+    if getattr(args, "ingest", None) is not None:
+        link["ingest"] = args.ingest
+    if not getattr(args, "consume", None) and not getattr(args, "ingest", None):
         link["consume"] = True
         link["ingest"] = True
     save_registry(registry)
@@ -845,11 +894,11 @@ def cmd_link_off(args: argparse.Namespace) -> None:
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
     link = kb.setdefault("link", {"consume": True, "ingest": True})
-    if getattr(args, "consume", False):
-        link["consume"] = False
-    if getattr(args, "ingest", False):
-        link["ingest"] = False
-    if not getattr(args, "consume", False) and not getattr(args, "ingest", False):
+    if getattr(args, "consume", None) is not None:
+        link["consume"] = args.consume
+    if getattr(args, "ingest", None) is not None:
+        link["ingest"] = args.ingest
+    if not getattr(args, "consume", None) and not getattr(args, "ingest", None):
         link["consume"] = False
         link["ingest"] = False
     save_registry(registry)
@@ -923,6 +972,11 @@ def cmd_move(args: argparse.Namespace) -> None:
     print(f"KB '{args.name}' spostata in {destination}")
 
 
+#
+# ── MCP commands ───────────────────────────────────────────────────────────────
+#
+
+
 def cmd_mcp_add(args: argparse.Namespace) -> None:
     env = global_env()
     registry = load_registry(env)
@@ -930,7 +984,7 @@ def cmd_mcp_add(args: argparse.Namespace) -> None:
     if not kb:
         sys.exit(f"KB '{args.name}' not found.")
     from kb_manager import merged_runtime_env
-    from mcp.router import KBRouter
+    from router import KBRouter
 
     engine_python, _ = _ensure_runtime(env)
     mcp_name = f"lightrag-{args.name}"
@@ -942,7 +996,7 @@ def cmd_mcp_add(args: argparse.Namespace) -> None:
         if len(clients) > 1:
             print(f"\n== {client} ==")
         fn = mcp_clients.CLIENTS[client]
-        if fn(mcp_name, engine_python, ...):  # MCP_SCRIPT, args.name, args.print_only, Path(kb["source_dir"])) != 0:
+        if fn(mcp_name, engine_python, MCP_SCRIPT, args.name, args.print_only, Path(kb["source_dir"])) != 0:
             rc = 1
     sys.exit(rc)
 
@@ -952,7 +1006,7 @@ def cmd_mcp_rm(args: argparse.Namespace) -> None:
     kb = find_kb(registry, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' not found.")
-    from mcp.router import KBRouter
+    from router import KBRouter
 
     mcp_name = f"lightrag-{args.name}"
     clients = list(mcp_clients.REMOVERS) if args.client == "all" else [args.client]
@@ -1002,14 +1056,17 @@ def cmd_job_status(args: argparse.Namespace) -> None:
                     break
                 time.sleep(1)
         ok = args.job_cmd != "wait" or job["stage"] == "COMPLETED"
-        job_dict = dict(job)
-        job_dict["ok"] = ok
-        print(json.dumps(job_dict, ensure_ascii=False))
+        print(json.dumps({"ok": ok, "job_id": job["job_id"], "kb": job["kb_id"], "source": job["source_id"], "state": job["stage"], **job.get("counters", {})}, ensure_ascii=False))
         if not ok:
             raise SystemExit(1)
     except (ValueError, OSError, RuntimeError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         raise SystemExit(1) from exc
+
+
+#
+# ── Memory commands ────────────────────────────────────────────────────────────
+#
 
 
 def cmd_memory_remember(args: argparse.Namespace) -> None:
@@ -1064,7 +1121,7 @@ def cmd_memory_recall(args: argparse.Namespace) -> None:
 
 # Retrieve generic information from selected KB backends using one hierarchical command.
 def cmd_retrieve_ask(args: argparse.Namespace) -> None:
-    from mcp.router import KBRouter
+    from router import KBRouter
 
     router = KBRouter()
     selected = args.kb or [kb["name"] for kb in ...]  # _registry_kbs(load_registry(global_env()))
@@ -1108,11 +1165,16 @@ def cmd_import_url(args: argparse.Namespace) -> None:
     print(json.dumps({"ok": True, "result": res}, indent=2, ensure_ascii=False))
 
 
+#
+# ── Hook commands ─────────────────────────────────────────────────────────────
+#
+
+
 def cmd_hook_inject(args: argparse.Namespace) -> None:
     prompt = args.prompt
     if not prompt and not sys.stdin.isatty():
         prompt = sys.stdin.read()
-    from mcp.router import KBRouter
+    from router import KBRouter
 
     router = KBRouter()
     res = router.remember(args.kb, prompt)  # or inject_pre_prompt_context
@@ -1124,7 +1186,7 @@ def cmd_hook_capture(args: argparse.Namespace) -> None:
     text = args.text
     if not text and not args.transcript and not sys.stdin.isatty():
         text = sys.stdin.read()
-    from mcp.router import KBRouter
+    from router import KBRouter
 
     router = KBRouter()
     res = router.capture_post_session(args.kb, transcript_path=args.transcript, raw_text=text, session_id=args.session_id)
@@ -1132,7 +1194,7 @@ def cmd_hook_capture(args: argparse.Namespace) -> None:
 
 
 def cmd_hook_install(args: argparse.Namespace) -> None:
-    from mcp.router import KBRouter
+    from router import KBRouter
 
     router = KBRouter()
     res = router.install_client_hook(
@@ -1141,6 +1203,11 @@ def cmd_hook_install(args: argparse.Namespace) -> None:
         target_project_dir=args.project_dir,
     )
     print(json.dumps(res, indent=2, ensure_ascii=False))
+
+
+#
+# ── Configuration ─────────────────────────────────────────────────────────────
+#
 
 
 # Display central configuration panel organized by pipeline phases.
@@ -1314,7 +1381,76 @@ def cmd_config_models(_args: argparse.Namespace) -> None:
     print(f"  Current engine: {env.get('DOCLING_ASR_ENGINE', 'whisper_turbo_native')} (Whisper only)")
 
 
-# Unified MCP authentication management commands.
+def cmd_memory_dream(args: argparse.Namespace) -> None:
+    """Run the consolidation and deduplication cycle (Dreaming)."""
+    registry = load_registry(global_env())
+    kb_name = args.kb or "all"
+    dry_run = getattr(args, "dry_run", False)
+    from memory_manager import run_dreaming_cycle
+    if kb_name == "all":
+        selected = ...  # _registry_kbs(registry)
+    else:
+        kb = find_kb(registry, kb_name)
+        if not kb:
+            sys.exit(f"KB '{kb_name}' not found.")
+        selected = [kb]
+    reports = []
+    for kb in selected:
+        report = run_dreaming_cycle(source_dir=kb["source_dir"], dry_run=dry_run)
+        reports.append({"kb": kb["name"], "report": report})
+    print(json.dumps({"ok": True, "reports": reports}, indent=2, ensure_ascii=False))
+
+
+def cmd_memory_list(args: argparse.Namespace) -> None:
+    """List KB memories."""
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.kb)
+    if not kb:
+        sys.exit(f"KB '{args.kb}' not found.")
+    memories = load_kb_memories(kb["source_dir"])
+    if args.type:
+        memories = [m for m in memories if m["type"] == args.type]
+    if args.status:
+        memories = [m for m in memories if m.get("status") == args.status]
+    print(json.dumps({"ok": True, "count": len(memories), "memories": memories}, indent=2, ensure_ascii=False))
+
+
+def cmd_memory_deprecate(args: argparse.Namespace) -> None:
+    """Invalidate or supersede a memory."""
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.kb)
+    if not kb:
+        sys.exit(f"KB '{args.kb}' not found.")
+    mem = deprecate_memory_by_id(
+        source_dir=kb["source_dir"],
+        memory_id=args.memory_id,
+        reason=args.reason or "",
+        superseded_by=args.superseded_by,
+    )
+    if not mem:
+        sys.exit(f"Memoria '{args.memory_id}' not found.")
+    print(json.dumps({"ok": True, "memory": mem}, indent=2, ensure_ascii=False))
+
+
+def cmd_memory_list(args: argparse.Namespace) -> None:
+    """List KB memories."""
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.kb)
+    if not kb:
+        sys.exit(f"KB '{args.kb}' not found.")
+    memories = load_kb_memories(kb["source_dir"])
+    if args.type:
+        memories = [m for m in memories if m["type"] == args.type]
+    if args.status:
+        memories = [m for m in memories if m.get("status") == args.status]
+    print(json.dumps({"ok": True, "count": len(memories), "memories": memories}, indent=2, ensure_ascii=False))
+
+
+#
+# ── Unified MCP authentication management commands. ────────────────────────────
+#
+
+
 def _restart_mcp_service_if_active() -> None:
     """Restart knowledge-mcp systemd user service if currently active."""
     import subprocess
@@ -1397,6 +1533,11 @@ def cmd_auth_clear(_args: argparse.Namespace) -> None:
     _restart_mcp_service_if_active()
 
 
+#
+# ── CLI Argument Parser ───────────────────────────────────────────────────────
+#
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ragcli",
@@ -1404,6 +1545,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    # ── sync ────────────────────────────────────────────────────────────────
     sync = sub.add_parser("sync", help="remote sync management")
     sync_sub = sync.add_subparsers(dest="sync_cmd", required=True)
     prepare = sync_sub.add_parser("prepare", help="prepare a sync job")
@@ -1413,27 +1555,32 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--json", action="store_true")
     prepare.set_defaults(func=cmd_sync_prepare)
 
+    # ── job ─────────────────────────────────────────────────────────────────
     job = sub.add_parser("job", help="job status")
     job_sub = job.add_subparsers(dest="job_cmd", required=True)
     for name in ("status", "wait"):
-        status = job_sub.add_parser(name)
-        status.add_argument("job_id")
-        status.add_argument("--kb", required=True)
-        status.add_argument("--json", action="store_true")
-        status.set_defaults(func=cmd_job_status)
+        st = job_sub.add_parser(name)
+        st.add_argument("job_id")
+        st.add_argument("--kb", required=True)
+        st.add_argument("--json", action="store_true")
+        st.set_defaults(func=cmd_job_status)
 
+    # ── doctor ──────────────────────────────────────────────────────────────
     doctor = sub.add_parser("doctor", help="verify runtime, config, services, and publishing")
     doctor.set_defaults(func=cmd_doctor)
 
+    # ── add ─────────────────────────────────────────────────────────────────
     add = sub.add_parser("add", help="create a KB from a source directory")
     add.add_argument("name")
     add.add_argument("source_dir")
-    add.add_argument("--port", type=int, help="porta del server LightRAG")
+    add.add_argument("--port", type=int, help="porta del server LightRAG (default: auto)")
     add.set_defaults(func=cmd_add)
 
+    # ── list ────────────────────────────────────────────────────────────────
     list_cmd = sub.add_parser("list", help="list registered KBs")
     list_cmd.set_defaults(func=cmd_list)
 
+    # ── ingest ──────────────────────────────────────────────────────────────
     ingest = sub.add_parser("ingest", help="incrementally sync the source to an existing KB")
     ingest.add_argument("name")
     ingest.add_argument("--force", action="store_true", help="regenerate derived artifacts and forcibly realign the KB")
@@ -1445,8 +1592,10 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--no-audio", action="store_true", help="disable the audio/video pipeline")
     ingest.add_argument("--source-folder", help="ingest a registered external source path")
     ingest.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
+    ingest.add_argument("--wait", action="store_true", help=argparse.SUPPRESS)
     ingest.set_defaults(func=cmd_ingest)
 
+    # ── inbox ───────────────────────────────────────────────────────────────
     inbox = sub.add_parser("inbox", help="append-only inbox management")
     inbox_sub = inbox.add_subparsers(dest="inbox_cmd", required=True)
     inbox_send = inbox_sub.add_parser("send", help="queue a file or directory")
@@ -1462,6 +1611,7 @@ def build_parser() -> argparse.ArgumentParser:
     inbox_status.add_argument("--json", action="store_true")
     inbox_status.set_defaults(func=cmd_inbox_status)
 
+    # ── source ──────────────────────────────────────────────────────────────
     source = sub.add_parser("source", help="manage external source folders")
     source_sub = source.add_subparsers(dest="source_cmd", required=True)
     source_add = source_sub.add_parser("add", help="register an external folder")
@@ -1481,27 +1631,30 @@ def build_parser() -> argparse.ArgumentParser:
     source_ingest.add_argument("--force", action="store_true")
     source_ingest.set_defaults(func=cmd_source_ingest)
 
+    # ── link ────────────────────────────────────────────────────────────────
     link = sub.add_parser("link", help="control persistent automation")
     link_sub = link.add_subparsers(dest="link_cmd", required=True)
     link_on = link_sub.add_parser("on", help="enable consume and/or ingest automation")
     link_on.add_argument("name")
-    link_on.add_argument("--consume", action="store_true")
-    link_on.add_argument("--ingest", action="store_true")
+    link_on.add_argument("--consume", action="store_true", help="enable consume automation")
+    link_on.add_argument("--ingest", action="store_true", help="enable ingest automation")
     link_on.set_defaults(func=cmd_link_on)
     link_off = link_sub.add_parser("off", help="disable consume and/or ingest automation")
     link_off.add_argument("name")
-    link_off.add_argument("--consume", action="store_true")
-    link_off.add_argument("--ingest", action="store_true")
+    link_off.add_argument("--consume", action="store_true", help="disable consume automation")
+    link_off.add_argument("--ingest", action="store_true", help="disable ingest automation")
     link_off.set_defaults(func=cmd_link_off)
     link_status = link_sub.add_parser("status", help="show automation status")
     link_status.add_argument("name")
     link_status.set_defaults(func=cmd_link_status)
 
+    # ── worker ──────────────────────────────────────────────────────────────
     worker = sub.add_parser("_worker_consume", help=argparse.SUPPRESS)
     worker.add_argument("name")
     worker.add_argument("--job")
     worker.set_defaults(func=cmd_worker_consume)
 
+    # ── exclude ─────────────────────────────────────────────────────────────
     exclude_help = (
         "Pattern glob stile fnmatch.\n"
         "- use a trailing / to indicate a folder: 'agent/' takes the folder top-level 'agent'; 'notes/agent/' prende quel path specifico\n"
@@ -1550,18 +1703,22 @@ def build_parser() -> argparse.ArgumentParser:
     ex_ls.add_argument("--expanded", action="store_true", help="show the live expansion of excluded folders")
     ex_ls.set_defaults(func=cmd_exclude_ls)
 
+    # ── start ───────────────────────────────────────────────────────────────
     start = sub.add_parser("start", help="start a KB server")
     start.add_argument("name")
     start.set_defaults(func=cmd_start)
 
+    # ── stop ────────────────────────────────────────────────────────────────
     stop = sub.add_parser("stop", help="stop a KB server")
     stop.add_argument("name")
     stop.set_defaults(func=cmd_stop)
 
+    # ── remove ──────────────────────────────────────────────────────────────
     remove = sub.add_parser("remove", help="delete the entire KB while preserving source files")
     remove.add_argument("name")
     remove.set_defaults(func=cmd_remove)
 
+    # ── mcp ──────────────────────────────────────────────────────────────────
     mcp = sub.add_parser("mcp", help="register or remove MCP in supported clients")
     mcp_sub = mcp.add_subparsers(dest="mcp_cmd", required=True)
     mcp_add = mcp_sub.add_parser("add", help="register the KB MCP")
@@ -1574,7 +1731,7 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_rm.add_argument("--client", choices=list(mcp_clients.REMOVERS) + ["all"], default="claude-code")
     mcp_rm.set_defaults(func=cmd_mcp_rm)
 
-    # Dedicated unified auth subcommand for MCP
+    # ── auth ────────────────────────────────────────────────────────────────
     auth = sub.add_parser("auth", help="gestione centralizzata della password/token di protezione MCP")
     auth_sub = auth.add_subparsers(dest="auth_cmd")
     auth.set_defaults(func=cmd_auth_show)
@@ -1593,10 +1750,12 @@ def build_parser() -> argparse.ArgumentParser:
     auth_clear = auth_sub.add_parser("clear", help="rimuove la password (accesso libero)")
     auth_clear.set_defaults(func=cmd_auth_clear)
 
+    # ── move ────────────────────────────────────────────────────────────────
     move = sub.add_parser("move", help="move data_dir between source path and local repo")
     move.add_argument("name")
     move.set_defaults(func=cmd_move)
 
+    # ── service ─────────────────────────────────────────────────────────────
     service = sub.add_parser("service", help="manage Linux systemd --user services")
     service_sub = service.add_subparsers(dest="service_cmd", required=True)
     service_status = service_sub.add_parser("status", help="show service status")
@@ -1611,7 +1770,7 @@ def build_parser() -> argparse.ArgumentParser:
     service_install = service_sub.add_parser("install-units", help="installa le unit systemd --user del repo")
     service_install.set_defaults(func=cmd_service_install_units)
 
-    # memory subcommand
+    # ── memory ──────────────────────────────────────────────────────────────
     mem_parser = sub.add_parser("memory", help="manage memory for coding agents")
     mem_sub = mem_parser.add_subparsers(dest="memory_cmd", required=True)
 
@@ -1652,6 +1811,7 @@ def build_parser() -> argparse.ArgumentParser:
     dep_p.add_argument("--superseded-by", default=None, help="ID of the new memory that replaces it")
     dep_p.set_defaults(func=cmd_memory_deprecate)
 
+    # ── retrieve ────────────────────────────────────────────────────────────
     retrieve = sub.add_parser("retrieve", help="retrieval gerarchico su tutte le KB o su KB selezionate")
     retrieve_sub = retrieve.add_subparsers(dest="retrieve_cmd", required=True)
     retrieve_ask = retrieve_sub.add_parser("ask", help="interroga una o tutte le KB")
@@ -1675,14 +1835,14 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_url.add_argument("--no-index", action="store_true", help="non inviare al server LightRAG (salva solo il file markdown)")
     retrieve_url.set_defaults(func=cmd_import_url)
 
-    # import-archive command
+    # ── import-archive ──────────────────────────────────────────────────────
     imp_p = sub.add_parser("import-archive", help="import and normalize chat/data archives (ZIP/JSON)")
     imp_p.add_argument("kb", help="KB name")
     imp_p.add_argument("archive", help="ZIP file or exported folder path")
     imp_p.add_argument("--format", choices=("auto", "chatgpt", "claude", "gemini", "generic"), default="auto")
     imp_p.set_defaults(func=cmd_import_archive)
 
-    # import-url command (yt-dlp + whisper)
+    # ── import-url ──────────────────────────────────────────────────────────
     url_p = sub.add_parser("import-url", help="download media from YouTube, Soundcloud, Instagram, and TikTok with yt-dlp, transcribe with Whisper, and index it in the KB")
     url_p.add_argument("kb", help="KB name")
     url_p.add_argument("url", help="URL media (YouTube, Soundcloud, Instagram, TikTok, ecc.)")
@@ -1691,7 +1851,7 @@ def build_parser() -> argparse.ArgumentParser:
     url_p.add_argument("--no-index", action="store_true", help="non inviare al server LightRAG (salva solo il file markdown)")
     url_p.set_defaults(func=cmd_import_url)
 
-    # hook command
+    # ── hook ────────────────────────────────────────────────────────────────
     hook_parser = sub.add_parser("hook", help="hooks for coding agents (pre-prompt and post-session)")
     hook_sub = hook_parser.add_subparsers(dest="hook_cmd", required=True)
 
@@ -1713,6 +1873,7 @@ def build_parser() -> argparse.ArgumentParser:
     hinst_p.add_argument("--project-dir", default=None)
     hinst_p.set_defaults(func=cmd_hook_install)
 
+    # ── config ──────────────────────────────────────────────────────────────
     cfg_parser = sub.add_parser("config", help="centralized configuration panel (pipeline phases, models, and runtime)")
     cfg_sub = cfg_parser.add_subparsers(dest="config_cmd")
     cfg_parser.set_defaults(func=cmd_config_show)

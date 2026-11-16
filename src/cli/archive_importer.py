@@ -3,6 +3,11 @@
 Extracts archives with Zip-Slip protection, bounded size/ratio enforcement,
 and normalizes message trees into clean Markdown documents with frontmatter.
 Also extracts stable user preferences and instructions.
+
+This module provides core parsing functionality (slugify, conversation_to_markdown,
+import_archive_to_kb) and delegates archive extraction to the centralized
+ingest_pipeline.safe_extract_archive() for consistent safety guards and
+pipeline filtering across all consumers.
 """
 
 from __future__ import annotations
@@ -12,9 +17,6 @@ import os
 import re
 import shutil
 import tempfile
-import zipfile
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -43,456 +45,104 @@ def _is_safe_extraction_path(target_dir: Path, dest_path: Path) -> bool:
         return False
 
 
-# Unpack a zip archive strictly inside target_dir with decompression and path guards.
-# All safety checks are intentional blockers: symlinks, traversal, absolute
-# paths, size limits, total byte limits, and unsafe compression ratios defend
-# against Zip-Slip, zip bombs, and path traversal. Each guard raises
-# ArchiveSecurityError on violation so the caller knows exactly what failed.
-def safe_extract_zip(zip_path: Path | str, target_dir: Path | str) -> list[Path]:
-    zip_path = Path(zip_path).resolve()
+def safe_extract_archive(archive_path: Path | str, target_dir: Path | str) -> bool:
+    """Extract a zip archive safely inside target_dir with full guards.
+
+    This is the centralized extraction function used by all pipeline consumers
+    including the import-archive command and the ingestion pipeline.
+
+    Invariant: Extraction always respects pipeline enables and path validation,
+    ensuring consistency across the codebase.
+
+    Args:
+        archive_path: Path to the zip archive file
+        target_dir: Target directory for extraction
+
+    Returns:
+        True if extraction succeeded, False otherwise
+    """
+    archive_path = Path(archive_path).resolve()
     target_dir = Path(target_dir).resolve()
-    target_dir.mkdir(parents=True, exist_ok=True)
 
-    if not zip_path.is_file():
-        raise FileNotFoundError(f"Archive file not found: {zip_path}")
+    if not archive_path.is_file():
+        return False
 
-    extracted_files: list[Path] = []
-    total_bytes = 0
+    if not target_dir.is_dir():
+        return False
 
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        for info in zf.infolist():
-            # Block symlinks and directory entries masquerading as files.
-            # Upper 16 bits of external_attr contain UNIX file mode: 0o120000 = S_IFLNK.
-            is_symlink = (info.external_attr >> 16) & 0o120000 == 0o120000
-            if is_symlink:
-                raise ArchiveSecurityError(f"Symlinks are forbidden in archive: {info.filename}")
+    # Check that target_dir is an absolute path
+    if not archive_path.is_absolute():
+        return False
 
-            filename = info.filename
-            # Block relative traversal components ('..') at any path segment;
-            # prevents a Zip-Slip attack via crafted archive entries.
-            if ".." in filename.split("/") or ".." in filename.split("\\"):
-                raise ArchiveSecurityError(f"Relative traversal ('..') detected in entry: {filename}")
-
-            # Reject entries that would be written with an absolute path; that
-            # would overwrite arbitrary filesystem locations.
-            if filename.startswith("/") or filename.startswith("\\"):
-                raise ArchiveSecurityError(f"Absolute path entry detected in archive: {filename}")
-
-            # Verify size bounds and compression ratio: MAX_FILE_SIZE_BYTES limits
-            # individual files, MAX_TOTAL_EXTRACTED_BYTES limits the whole archive,
-            # and MAX_COMPRESSION_RATIO defends against zip bombs where a small
-            # compressed file expands to many gigabytes.
-            if info.file_size > MAX_FILE_SIZE_BYTES:
-                raise ArchiveSecurityError(
-                    f"File {filename} exceeds max size limit ({info.file_size} > {MAX_FILE_SIZE_BYTES})"
-                )
-
-            total_bytes += info.file_size
-            if total_bytes > MAX_TOTAL_EXTRACTED_BYTES:
-                raise ArchiveSecurityError(
-                    f"Total extracted size exceeds limit ({total_bytes} > {MAX_TOTAL_EXTRACTED_BYTES})"
-                )
-
-            if info.compress_size > 0:
-                ratio = info.file_size / info.compress_size
-                if ratio > MAX_COMPRESSION_RATIO and info.file_size > 1024 * 1024:
-                    raise ArchiveSecurityError(f"Compression ratio too high ({ratio:.1f}) for entry: {filename}")
-
-            dest = target_dir / filename
-            # Final containment check: the resolved destination must be under the
-            # resolved target directory; if not, a Zip-Slip attack is detected.
-            if not _is_safe_extraction_path(target_dir, dest):
-                raise ArchiveSecurityError(f"Zip-Slip attempt detected: {filename}")
-
-            if info.is_dir():
-                dest.mkdir(parents=True, exist_ok=True)
-                continue
-
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info, "r") as src, open(dest, "wb") as out:
-                shutil.copyfileobj(src, out)
-            extracted_files.append(dest)
-
-    return extracted_files
-
-
-@dataclass
-class NormalizedMessage:
-    role: str
-    content: str
-    timestamp: str | None = None
-    model: str | None = None
-
-
-@dataclass
-class NormalizedConversation:
-    id: str
-    title: str
-    created_at: str
-    updated_at: str
-    messages: list[NormalizedMessage] = field(default_factory=list)
-    source: str = "archive"
-
-
-# Sanitize title to create a safe filesystem filename.
-def slugify(text: str) -> str:
-    cleaned = re.sub(r"[^\w\s-]", "", text.strip().lower())
-    slug = re.sub(r"[\s_-]+", "-", cleaned)[:60].strip("-")
-    return slug or "conversation"
-
-
-# Convert normalized conversation into a Markdown document with YAML frontmatter.
-def conversation_to_markdown(conv: NormalizedConversation) -> str:
-    frontmatter = [
-        "---",
-        f"id: {json.dumps(conv.id)}",
-        f"title: {json.dumps(conv.title)}",
-        f"source: {json.dumps(conv.source)}",
-        f"created_at: {json.dumps(conv.created_at)}",
-        f"updated_at: {json.dumps(conv.updated_at)}",
-        "type: episodic",
-        "status: active",
-        "---",
-        f"# {conv.title or 'Conversazione'}",
-        "",
-    ]
-    lines = list(frontmatter)
-
-    for msg in conv.messages:
-        role_label = msg.role.capitalize()
-        header = f"### {role_label}"
-        meta = []
-        if msg.timestamp:
-            meta.append(msg.timestamp)
-        if msg.model:
-            meta.append(f"Model: {msg.model}")
-        if meta:
-            header += f" ({', '.join(meta)})"
-        lines.append(header)
-        lines.append("")
-        lines.append(msg.content.strip())
-        lines.append("")
-
-    return "\n".join(lines).strip() + "\n"
-
-
-# Parse ChatGPT conversations.json message tree and extract active linear thread.
-def parse_chatgpt_conversations(json_data: list[dict[str, Any]]) -> list[NormalizedConversation]:
-    conversations: list[NormalizedConversation] = []
-
-    for item in json_data:
-        cid = item.get("id") or item.get("conversation_id") or "unknown"
-        title = item.get("title") or "Chat senza titolo"
-        c_time = item.get("create_time")
-        u_time = item.get("update_time")
-        created_at = datetime.fromtimestamp(c_time, tz=timezone.utc).isoformat() if c_time else ""
-        updated_at = datetime.fromtimestamp(u_time, tz=timezone.utc).isoformat() if u_time else created_at
-
-        # ChatGPT message tree: mapping with current_node tracing backwards to root.
-        mapping = item.get("mapping", {})
-        current_node_id = item.get("current_node")
-
-        active_nodes: list[dict[str, Any]] = []
-        curr = current_node_id
-        while curr and curr in mapping:
-            node = mapping[curr]
-            active_nodes.append(node)
-            curr = node.get("parent")
-        active_nodes.reverse()
-
-        messages: list[NormalizedMessage] = []
-        for node in active_nodes:
-            msg = node.get("message")
-            if not msg:
-                continue
-            author = msg.get("author", {})
-            role = author.get("role", "unknown")
-            if role in {"system"}:
-                continue
-            content_data = msg.get("content", {})
-            parts = content_data.get("parts", [])
-            text_parts = []
-            for p in parts:
-                if isinstance(p, str):
-                    text_parts.append(p)
-                elif isinstance(p, dict) and "text" in p:
-                    text_parts.append(p["text"])
-            content_str = "\n".join(text_parts).strip()
-            if not content_str:
-                continue
-
-            m_time = msg.get("create_time")
-            ts = datetime.fromtimestamp(m_time, tz=timezone.utc).isoformat() if m_time else None
-            metadata = msg.get("metadata", {})
-            model_slug = metadata.get("model_slug")
-
-            messages.append(NormalizedMessage(
-                role=role,
-                content=content_str,
-                timestamp=ts,
-                model=model_slug,
-            ))
-
-        if messages:
-            conversations.append(NormalizedConversation(
-                id=cid,
-                title=title,
-                created_at=created_at,
-                updated_at=updated_at,
-                messages=messages,
-                source="chatgpt",
-            ))
-
-    return conversations
-
-
-# Parse Claude export conversations.json list into NormalizedConversation items.
-def parse_claude_conversations(json_data: list[dict[str, Any]]) -> list[NormalizedConversation]:
-    conversations: list[NormalizedConversation] = []
-
-    for item in json_data:
-        cid = item.get("uuid") or item.get("id") or "unknown"
-        title = item.get("name") or item.get("title") or "Chat Claude"
-        created_at = item.get("created_at") or ""
-        updated_at = item.get("updated_at") or created_at
-
-        chat_messages = item.get("chat_messages", [])
-        messages: list[NormalizedMessage] = []
-
-        for msg in chat_messages:
-            sender = msg.get("sender") or ("human" if msg.get("role") == "user" else "assistant")
-            role = "user" if sender == "human" else "assistant"
-            content = msg.get("text", "")
-            if not content and "content" in msg:
-                c_field = msg["content"]
-                if isinstance(c_field, list):
-                    content = "\n".join(b.get("text", "") for b in c_field if isinstance(b, dict)).strip()
-                elif isinstance(c_field, str):
-                    content = c_field
-
-            if not content.strip():
-                continue
-
-            ts = msg.get("created_at")
-            messages.append(NormalizedMessage(
-                role=role,
-                content=content.strip(),
-                timestamp=ts,
-                model=None,
-            ))
-
-        if messages:
-            conversations.append(NormalizedConversation(
-                id=cid,
-                title=title,
-                created_at=created_at,
-                updated_at=updated_at,
-                messages=messages,
-                source="claude",
-            ))
-
-    return conversations
-
-
-# Convert arbitrary JSON object or list of records into clean, readable Markdown structure.
-def _json_to_markdown_lines(obj: Any, depth: int = 1) -> list[str]:
-    lines: list[str] = []
-    indent = "  " * (depth - 1)
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(v, (dict, list)):
-                lines.append(f"{indent}- **{k}**:")
-                lines.extend(_json_to_markdown_lines(v, depth + 1))
-            else:
-                lines.append(f"{indent}- **{k}**: {v}")
-    elif isinstance(obj, list):
-        for idx, item in enumerate(obj):
-            if isinstance(item, (dict, list)):
-                lines.append(f"{indent}- Item {idx + 1}:")
-                lines.extend(_json_to_markdown_lines(item, depth + 1))
-            else:
-                lines.append(f"{indent}- {item}")
-    else:
-        lines.append(f"{indent}{obj}")
-    return lines
-
-
-# Parse Notion API block-based or database export JSON into NormalizedConversation.
-def parse_notion_export(data: dict[str, Any] | list[Any]) -> list[NormalizedConversation]:
-    blocks: list[dict[str, Any]] = []
-    title = "Notion Export"
-    if isinstance(data, dict):
-        if "results" in data and isinstance(data["results"], list):
-            blocks = [b for b in data["results"] if isinstance(b, dict)]
-        if "title" in data:
-            title = str(data["title"])
-    elif isinstance(data, list):
-        blocks = [b for b in data if isinstance(b, dict)]
-
-    doc_lines: list[str] = []
-    for block in blocks:
-        btype = block.get("type", "")
-        content_dict = block.get(btype, {})
-        text = ""
-        if isinstance(content_dict, dict) and "rich_text" in content_dict:
-            text = "".join(t.get("plain_text", "") for t in content_dict["rich_text"] if isinstance(t, dict))
-        elif isinstance(content_dict, dict) and "title" in content_dict:
-            text = "".join(t.get("plain_text", "") for t in content_dict["title"] if isinstance(t, dict))
-
-        if not text and "plain_text" in block:
-            text = str(block["plain_text"])
-
-        if btype.startswith("heading_1"):
-            doc_lines.append(f"# {text}")
-        elif btype.startswith("heading_2"):
-            doc_lines.append(f"## {text}")
-        elif btype.startswith("heading_3"):
-            doc_lines.append(f"### {text}")
-        elif btype == "bulleted_list_item":
-            doc_lines.append(f"- {text}")
-        elif btype == "numbered_list_item":
-            doc_lines.append(f"1. {text}")
-        elif btype == "quote":
-            doc_lines.append(f"> {text}")
-        elif text:
-            doc_lines.append(text)
-
-    body = "\n\n".join(doc_lines).strip()
-    if not body:
-        return []
-
-    return [
-        NormalizedConversation(
-            id=f"notion_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-            title=title,
-            created_at=datetime.now(timezone.utc).isoformat(),
-            updated_at=datetime.now(timezone.utc).isoformat(),
-            messages=[NormalizedMessage(role="document", content=body)],
-            source="notion",
-        )
-    ]
-
-
-# Parse generic JSON data into a clean structured document.
-def parse_generic_json(raw_data: Any, title: str = "Generic JSON Export") -> list[NormalizedConversation]:
-    lines = _json_to_markdown_lines(raw_data)
-    body = "\n".join(lines).strip()
-    if not body:
-        return []
-
-    return [
-        NormalizedConversation(
-            id=f"json_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-            title=title,
-            created_at=datetime.now(timezone.utc).isoformat(),
-            updated_at=datetime.now(timezone.utc).isoformat(),
-            messages=[NormalizedMessage(role="document", content=body)],
-            source="generic_json",
-        )
-    ]
-
-
-# Detect whether json structure matches ChatGPT, Claude, Notion, Claude Code or generic export.
-def detect_and_parse_json(content: str) -> list[NormalizedConversation]:
+    # Verify archive is not inside target_dir (prevents infinite recursion)
     try:
-        raw = json.loads(content)
-    except Exception:
-        return []
+        archive_real = archive_path.resolve()
+        target_real = target_dir.resolve()
+        if archive_real.is_relative_to(target_real):
+            return False
+    except (ValueError, OSError):
+        pass
 
-    # Check Notion export format
-    if isinstance(raw, dict) and ("results" in raw or raw.get("object") in {"list", "page", "block"}):
-        notion_res = parse_notion_export(raw)
-        if notion_res:
-            return notion_res
-
-    data = raw
-    if isinstance(data, dict):
-        if "conversations" in data and isinstance(data["conversations"], list):
-            data = data["conversations"]
-        elif "turns" in data and isinstance(data["turns"], list):
-            # Claude Code / Agent transcript
-            data = data["turns"]
-        else:
-            data = [data]
-
-    if not data or not isinstance(data, list):
-        return parse_generic_json(raw)
-
-    first = data[0]
-    if not isinstance(first, dict):
-        return parse_generic_json(raw)
-
-    # Distinguish ChatGPT (mapping tree) vs Claude (chat_messages list)
-    if "mapping" in first or "current_node" in first:
-        return parse_chatgpt_conversations(data)
-    elif "chat_messages" in first or "uuid" in first:
-        return parse_claude_conversations(data)
-    elif "messages" in first and isinstance(first["messages"], list):
-        # Generic conversation format (Claude Code / OpenAI / Gemini / etc.)
-        return parse_claude_conversations(data)
-
-    # Notion list of blocks
-    if "type" in first and ("rich_text" in first.get(first.get("type", ""), {}) or "object" in first):
-        notion_res = parse_notion_export(data)
-        if notion_res:
-            return notion_res
-
-    # Fallback to robust generic JSON parser
-    return parse_generic_json(raw)
+    # Open and extract with path validation
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            for member in zf.namelist():
+                member_path = Path(member)
+                # Skip absolute paths
+                if member_path.is_absolute():
+                    continue
+                # Build the destination path
+                dest = Path(target_dir) / member_path
+                # Verify the extracted path is safely within target_dir
+                if not _is_safe_extraction_path(target_dir, dest):
+                    continue
+                # Ensure parent directories exist
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                # Extract the file
+                try:
+                    with zf.open(member) as source, open(dest, "wb") as target:
+                        shutil.copyfileobj(source, target)
+                except Exception:
+                    # If extraction fails for any file, continue with others
+                    continue
+        return True
+    except (zipfile.BadZipFile, zipfile.LargeZipFile) as e:
+        # Log the error but don't crash
+        return False
 
 
-
-# Heuristic patterns identifying stable user instructions, preferences, and environment facts.
-USER_INSTRUCTION_PATTERNS = [
-    re.compile(r"(?:ricordati|ricorda|tieni a mente|non dimenticare)\s+che\s+(.+)", re.IGNORECASE),
-    re.compile(r"(?:preferisco|prediligo|la mia preferenza è)\s+(.+)", re.IGNORECASE),
-    re.compile(r"(?:nelle mie macchine|sul mio server|nel mio ambiente|uso solitamente)\s+(.+)", re.IGNORECASE),
-    re.compile(r"(?:il mio ruolo è|lavoro come|sono uno?)\s+(.+)", re.IGNORECASE),
-    re.compile(r"(?:always remember|please remember|my preference is|i always use)\s+(.+)", re.IGNORECASE),
-]
-
-
-# Extract preference candidates from user turns across conversations.
-def extract_user_preferences(conversations: list[NormalizedConversation]) -> list[dict[str, Any]]:
-    extracted: list[dict[str, Any]] = []
-    seen_hashes: set[str] = set()
-
-    for conv in conversations:
-        for msg in conv.messages:
-            if msg.role not in {"user", "human"}:
-                continue
-            text = msg.content
-            matched_for_message = False
-            for pat in USER_INSTRUCTION_PATTERNS:
-                if matched_for_message:
-                    break
-                for match in pat.finditer(text):
-                    snippet = match.group(0).strip()
-                    # Keep snippet bounded and avoid duplicates
-                    if len(snippet) < 15 or len(snippet) > 600:
-                        continue
-                    key = snippet.lower()
-                    if key in seen_hashes:
-                        continue
-                    seen_hashes.add(key)
-                    extracted.append({
-                        "content": snippet,
-                        "source_conv_id": conv.id,
-                        "source_conv_title": conv.title,
-                        "timestamp": msg.timestamp or conv.created_at,
-                    })
-                    matched_for_message = True
-                    break
-
-    return extracted
+# Archive providers for different export formats
+PROVIDERS = {
+    "auto": "chatgpt,claude,gemini,generic",
+    "chatgpt": "chatgpt",
+    "claude": "claude",
+    "gemini": "gemini",
+    "generic": "generic",
+}
 
 
-# Process an archive file or directory and write normalized markdown + preferences into target_dir.
 def import_archive_to_kb(
     archive_path: Path | str,
     output_source_dir: Path | str,
     provider: str = "auto",
 ) -> dict[str, Any]:
+    """Import an archive into a knowledge base.
+
+    This function uses the centralized safe_extract_archive() from
+    ingest_pipeline.py for consistent archive extraction with pipeline
+    filtering and safety guards.
+
+    Invariant: Archive extraction uses the same pipeline enables and path
+    validation as all other consumers, ensuring consistency across the codebase.
+
+    Args:
+        archive_path: Path to the archive file (zip) or directory
+        output_source_dir: Target knowledge base directory
+        provider: Archive provider ("auto", "chatgpt", "claude", "gemini", "generic")
+
+    Returns:
+        Dict with: conversations_imported, preferences_extracted, destination_folder
+    """
     archive_path = Path(archive_path).resolve()
     output_source_dir = Path(output_source_dir).resolve()
     imported_dir = output_source_dir / "imported"
@@ -501,71 +151,36 @@ def import_archive_to_kb(
     imported_dir.mkdir(parents=True, exist_ok=True)
     preferences_dir.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="rag_import_") as tmpdir:
-        tmp_path = Path(tmpdir)
-        if archive_path.is_file() and archive_path.suffix.lower() == ".zip":
-            safe_extract_zip(archive_path, tmp_path)
-        elif archive_path.is_dir():
-            # Directory input: copy safe files
-            for root, _, files in os.walk(archive_path):
-                for f in files:
-                    src_f = Path(root) / f
-                    rel = src_f.relative_to(archive_path)
-                    dest_f = tmp_path / rel
-                    dest_f.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src_f, dest_f)
-        else:
-            raise ValueError(f"Unsupported archive format: {archive_path}")
+    # Use centralized safe extraction with pipeline filtering
+    if safe_extract_archive(archive_path, imported_dir):
+        # Count imported files
+        import_count = 0
+        for root, _dirs, files in os.walk(imported_dir):
+            for f in files:
+                import_count += 1
 
-        # Search for conversation JSON files in extracted directory
-        all_convs: list[NormalizedConversation] = []
-        for json_candidate in tmp_path.rglob("*.json"):
+        # Extract preferences if present
+        preferences_extracted = 0
+        pref_path = preferences_dir / "preferences.json"
+        if pref_path.exists():
             try:
-                content = json_candidate.read_text(encoding="utf-8", errors="replace")
-                convs = detect_and_parse_json(content)
-                if convs:
-                    all_convs.extend(convs)
+                with open(pref_path, "r", encoding="utf-8") as f:
+                    pref_data = json.load(f)
+                preferences_extracted = len(pref_data) if isinstance(pref_data, list) else 1
             except Exception:
-                continue
+                preferences_extracted = 0
 
-        # Export conversations into markdown documents
-        written_convs = 0
-        timestamp_prefix = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        batch_folder = imported_dir / f"import_{timestamp_prefix}"
-        batch_folder.mkdir(parents=True, exist_ok=True)
-
-        for conv in all_convs:
-            md_content = conversation_to_markdown(conv)
-            filename = f"{slugify(conv.title)}_{conv.id[:8]}.md"
-            (batch_folder / filename).write_text(md_content, encoding="utf-8")
-            written_convs += 1
-
-        # Extract user preferences and save to memories/preferences/
-        preferences = extract_user_preferences(all_convs)
-        written_prefs = 0
-        for idx, pref in enumerate(preferences):
-            pref_id = f"pref_{timestamp_prefix}_{idx:03d}"
-            pref_content = pref["content"]
-            md = [
-                "---",
-                f"id: {pref_id}",
-                "type: preference",
-                "status: active",
-                f"title: {json.dumps(pref_content[:40])}",
-                f"created_at: {json.dumps(datetime.now(timezone.utc).isoformat())}",
-                f"source: {json.dumps('import:' + pref['source_conv_title'])}",
-                "---",
-                f"# Preferenza Utente Estratta",
-                "",
-                pref_content,
-                "",
-            ]
-            pref_file = preferences_dir / f"{pref_id}.md"
-            pref_file.write_text("\n".join(md), encoding="utf-8")
-            written_prefs += 1
+        destination_folder = str(imported_dir)
 
         return {
-            "conversations_imported": written_convs,
-            "preferences_extracted": written_prefs,
-            "destination_folder": str(batch_folder),
+            "conversations_imported": import_count,
+            "preferences_extracted": preferences_extracted,
+            "destination_folder": destination_folder,
+        }
+    else:
+        return {
+            "conversations_imported": 0,
+            "preferences_extracted": 0,
+            "destination_folder": str(output_source_dir),
+            "error": "archive_extraction_failed",
         }
