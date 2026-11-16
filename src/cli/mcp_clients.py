@@ -15,13 +15,33 @@ from pathlib import Path
 CLAUDE_DESKTOP_CONFIG = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
 ANTIGRAVITY_CONFIG = Path.home() / ".gemini" / "config" / "mcp_config.json"
 
+# Dispatch table mapping client names to their registration functions.
+# Invariant: every key here must also have an entry in REMOVERS so that
+# `ragcli mcp add --client all` and `ragcli mcp rm --client all` operate symmetrically.
+#
+# What this does: maps each client type (claude-code, claude-desktop, codex, antigravity, cursor)
+# to its corresponding add/remove registration function.
+# Inputs/Outputs: dict keyed by client name, values are registration/removal functions.
+CLIENTS: dict  # defined after all add_* functions
+
 
 # Construct the standard MCP command and argument dictionary for the lightrag server.
+#
+# What this does: builds a dict with 'command' (python executable path) and 'args'
+# (script path + kb name flag) for use across all MCP client registration functions.
+# Inputs/Outputs: python (Path to Python executable), script (Path to MCP script),
+# kb_name (str knowledge base name) -> dict {"command": str, "args": [str, str, str]}
 def _server_entry(python: Path, script: Path, kb_name: str) -> dict:
     return {"command": str(python), "args": [str(script), "--kb", kb_name]}
 
 
 # Merge one server without discarding other settings; back up before overwriting.
+#
+# What this does: merges a single MCP server entry into a JSON config file, creating a
+# backup of the previous version before overwriting. Handles both the case where the config
+# file exists and where it needs to be created.
+# Inputs/Outputs: path (Path to config file), mcp_name (str server name), entry (dict server
+# configuration), print_only (bool if True only prints without modifying) -> int return code (0 success)
 def _merge_json_mcp_server(path: Path, mcp_name: str, entry: dict, print_only: bool) -> int:
     if print_only:
         print(f"--- {path} (mcpServers.{mcp_name}) ---")
@@ -38,6 +58,10 @@ def _merge_json_mcp_server(path: Path, mcp_name: str, entry: dict, print_only: b
 
 
 # Resolve the Cursor project configuration file path (.cursor/mcp.json).
+#
+# What this does: finds the .cursor/mcp.json config file, checking source_folder first, then
+# cwd, then falling back to the base directory. Supports per-project and global cursor config.
+# Inputs/Outputs: source_folder (optional Path to check first) -> Path to the .cursor/mcp.json file
 def _cursor_config_path(source_folder: Path | None = None) -> Path:
     if source_folder and (source_folder / ".cursor" / "mcp.json").exists():
         return source_folder / ".cursor" / "mcp.json"
@@ -49,6 +73,13 @@ def _cursor_config_path(source_folder: Path | None = None) -> Path:
 
 
 # Register the project MCP server in Claude Code using its CLI.
+#
+# What this does: constructs and prints the claude mcp add command for project-scoped MCP
+# server registration. The command includes the MCP name, python path, script path, and kb_name.
+# If print_only is True, only prints the command without executing it. Otherwise, executes via
+# subprocess and confirms registration.
+# Inputs/Outputs: mcp_name (str), python (Path), script (Path), kb_name (str), print_only (bool),
+# source_folder (optional Path) -> int return code (0 success)
 def add_claude_code(mcp_name: str, python: Path, script: Path, kb_name: str, print_only: bool,
                      source_folder: Path | None = None) -> int:
     cwd = Path.cwd()
@@ -65,6 +96,12 @@ def add_claude_code(mcp_name: str, python: Path, script: Path, kb_name: str, pri
 
 
 # Register the server into Claude Desktop global config JSON.
+#
+# What this does: merges the MCP server entry into the Claude Desktop global config JSON file
+# (claude_desktop_config.json). Backs up the existing config before overwriting. Prints a reminder
+# to restart Claude Desktop to apply changes.
+# Inputs/Outputs: mcp_name (str), python (Path), script (Path), kb_name (str), print_only (bool),
+# source_folder (optional Path) -> int return code (0 success)
 def add_claude_desktop(mcp_name: str, python: Path, script: Path, kb_name: str, print_only: bool,
                         source_folder: Path | None = None) -> int:
     rc = _merge_json_mcp_server(CLAUDE_DESKTOP_CONFIG, mcp_name, _server_entry(python, script, kb_name), print_only)
@@ -74,6 +111,12 @@ def add_claude_desktop(mcp_name: str, python: Path, script: Path, kb_name: str, 
 
 
 # Register the server globally via Codex CLI.
+#
+# What this does: constructs and prints the codex mcp add command for global MCP registration.
+# Codex does not support per-project mcp_servers: config.toml is always global. Prints the command
+# and executes it via subprocess if print_only is False.
+# Inputs/Outputs: mcp_name (str), python (Path), script (Path), kb_name (str), print_only (bool),
+# source_folder (optional Path) -> int return code (0 success)
 def add_codex(mcp_name: str, python: Path, script: Path, kb_name: str, print_only: bool,
               source_folder: Path | None = None) -> int:
     # codex CLI does not support per-project mcp_servers: config.toml is always global.
@@ -88,6 +131,12 @@ def add_codex(mcp_name: str, python: Path, script: Path, kb_name: str, print_onl
 
 
 # Register the server into Antigravity mcp_config.json.
+#
+# What this does: merges the MCP server entry into the Antigravity global config JSON file
+# (.gemini/config/mcp_config.json). Backs up the existing config before overwriting. Prints a
+# reminder to restart Antigravity to apply changes.
+# Inputs/Outputs: mcp_name (str), python (Path), script (Path), kb_name (str), print_only (bool),
+# source_folder (optional Path) -> int return code (0 success)
 def add_antigravity(mcp_name: str, python: Path, script: Path, kb_name: str, print_only: bool,
                      source_folder: Path | None = None) -> int:
     rc = _merge_json_mcp_server(ANTIGRAVITY_CONFIG, mcp_name, _server_entry(python, script, kb_name), print_only)
@@ -97,6 +146,12 @@ def add_antigravity(mcp_name: str, python: Path, script: Path, kb_name: str, pri
 
 
 # Register the KB MCP server in the Cursor project configuration file (.cursor/mcp.json).
+#
+# What this does: finds the .cursor/mcp.json config file (checking source_folder, cwd, or base)
+# and merges the MCP server entry into it, creating a backup of the previous version. Prints a
+# reminder to restart Cursor to apply changes.
+# Inputs/Outputs: mcp_name (str), python (Path), script (Path), kb_name (str), print_only (bool),
+# source_folder (optional Path) -> int return code (0 success)
 def add_cursor(mcp_name: str, python: Path, script: Path, kb_name: str, print_only: bool,
                source_folder: Path | None = None) -> int:
     path = _cursor_config_path(source_folder)
@@ -116,6 +171,11 @@ CLIENTS = {
 
 
 # Remove a JSON-configured server only after successfully reading its config.
+#
+# What this does: removes a JSON-configured MCP server from a config file after reading it.
+# Creates a .bak backup of the original config before writing the modified version. Reads the
+# config, pops the mcp_name from mcpServers, and writes the updated config back.
+# Inputs/Outputs: path (Path to config file), mcp_name (str server name) -> int return code (0 success)
 def _remove_json_mcp_server(path: Path, mcp_name: str) -> int:
     if not path.exists():
         print(f"File {path} does not exist.")
@@ -137,6 +197,11 @@ def _remove_json_mcp_server(path: Path, mcp_name: str) -> int:
 
 
 # Remove the server registration from Claude Code project or global scope.
+#
+# What this does: removes an MCP server registration from Claude Code. Checks for a local
+# .mcp.json first; if it exists, uses --scope project to remove from project scope. Otherwise
+# removes from the global registry. Executes via claude mcp remove subprocess.
+# Inputs/Outputs: mcp_name (str), source_folder (optional Path) -> int return code (0 success)
 def remove_claude_code(mcp_name: str, source_folder: Path | None = None) -> int:
     cwd = Path.cwd()
     if (cwd / ".mcp.json").exists():
@@ -167,11 +232,19 @@ def remove_claude_code(mcp_name: str, source_folder: Path | None = None) -> int:
 
 
 # Remove the server from Claude Desktop global config.
+#
+# What this does: removes an MCP server from the Claude Desktop global config JSON file
+# (claude_desktop_config.json) by calling _remove_json_mcp_server with the configured path.
+# Inputs/Outputs: mcp_name (str), source_folder (optional Path) -> int return code (0 success)
 def remove_claude_desktop(mcp_name: str, source_folder: Path | None = None) -> int:
     return _remove_json_mcp_server(CLAUDE_DESKTOP_CONFIG, mcp_name)
 
 
 # Remove the server from Codex CLI global registration.
+#
+# What this does: removes an MCP server from the Codex CLI global registration by executing
+# the codex mcp remove command. Prints the unregistration command and executes it via subprocess.
+# Inputs/Outputs: mcp_name (str), source_folder (optional Path) -> int return code (0 success)
 def remove_codex(mcp_name: str, source_folder: Path | None = None) -> int:
     cmd = ["codex", "mcp", "remove", mcp_name]
     print("Unregistration command:\n  " + " ".join(cmd))
@@ -188,11 +261,20 @@ def remove_codex(mcp_name: str, source_folder: Path | None = None) -> int:
 
 
 # Remove the server from Antigravity configuration.
+#
+# What this does: removes an MCP server from the Antigravity global config (.gemini/config/mcp_config.json)
+# by calling _remove_json_mcp_server with the configured path.
+# Inputs/Outputs: mcp_name (str), source_folder (optional Path) -> int return code (0 success)
 def remove_antigravity(mcp_name: str, source_folder: Path | None = None) -> int:
     return _remove_json_mcp_server(ANTIGRAVITY_CONFIG, mcp_name)
 
 
 # Remove the specified server from .cursor/mcp.json and create a backup of the original config.
+#
+# What this does: finds the .cursor/mcp.json config file (checking source_folder, cwd, or base)
+# and removes the specified MCP server from it, creating a .bak backup of the original config.
+# Calls _remove_json_mcp_server with the resolved path.
+# Inputs/Outputs: mcp_name (str), source_folder (optional Path) -> int return code (0 success)
 def remove_cursor(mcp_name: str, source_folder: Path | None = None) -> int:
     path = _cursor_config_path(source_folder)
     return _remove_json_mcp_server(path, mcp_name)

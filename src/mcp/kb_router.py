@@ -39,8 +39,8 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-if str(ROOT / "bin") not in sys.path:
-    sys.path.insert(0, str(ROOT / "bin"))
+if str(ROOT / "src" / "cli") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src" / "cli"))
 
 from kb_registry import find_kb, global_env, load_registry, storage_mode  # noqa: E402
 from mcp.memories import (  # noqa: E402
@@ -806,7 +806,7 @@ class KBRouter:
             if not record:
                 return _serialize({"error": "KB_NOT_FOUND", "kb": kb})
             engine_python = Path(global_env().get("ENGINE_PYTHON", sys.executable))
-            worker_cmd = [str(engine_python), str(ROOT / "bin" / "ragcli.py"), "_worker_consume", kb]
+            worker_cmd = [str(engine_python), str(ROOT / "src" / "cli" / "ragcli.py"), "_worker_consume", kb]
             if job_id:
                 worker_cmd.extend(["--job", job_id])
             log_path = Path(record["data_dir"]) / "inbox.log"
@@ -836,7 +836,7 @@ class KBRouter:
             engine_python = Path(global_env().get("ENGINE_PYTHON", sys.executable))
             pids = []
             for source in selected:
-                cmd = [str(engine_python), str(ROOT / "bin" / "ingest.py"), "--kb", kb, "--source-folder", source]
+                cmd = [str(engine_python), str(ROOT / "src" / "cli" / "ingest.py"), "--kb", kb, "--source-folder", source]
                 if force:
                     cmd.append("--force")
                 log_path = Path(record["data_dir"]) / "ingest.log"
@@ -855,7 +855,7 @@ class KBRouter:
     ) -> str:
         """Download media from YouTube, Soundcloud, Instagram, TikTok, etc. via yt-dlp, transcribe with Whisper, and ingest into KB."""
         try:
-            from bin.url_importer import import_media_url_to_kb
+            from url_importer import import_media_url_to_kb
             result = import_media_url_to_kb(
                 kb_name=kb,
                 url=url,

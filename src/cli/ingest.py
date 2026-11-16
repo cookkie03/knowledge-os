@@ -36,7 +36,6 @@ from pipeline.parsers import (
     compute_file_sha256 as file_hash,
     looks_garbled as _looks_garbled,
 )
-from ingest_json_transform import maybe_transform_json_on_ingest
 
 
 def text_hash(text: str) -> str:
@@ -585,41 +584,6 @@ def read_text_file(path: Path) -> str:
 def render_content(path: Path, env: dict[str, str]) -> tuple[str, str | None]:
     ext = path.suffix.lower()
     category = category_for(path)
-
-    # ── JSON: single pre-treatment → transform to Markdown ──────────────────
-    if ext == ".json":
-        from kb_manager import is_relative_to, global_env as _global_env
-
-        env = env or _global_env()
-        data_dir = Path(env.get("DATA_DIR", "")) if isinstance(env, dict) else Path()
-        derived_dir = Path(env.get("DERIVED_DIR", "")) if isinstance(env, dict) else Path()
-
-        result = maybe_transform_json_on_ingest(path, data_dir, derived_dir, env)
-        if result and result.get("transformed"):
-            # Return markdown content and set category to "json" (will be rendered as text)
-            md_path_rel = result["artifact_rel"]
-            # Read the generated markdown
-            from pathlib import Path as P
-            full_data_dir = Path(env.get("DATA_DIR", str(Path.home() / "kb"))) if isinstance(env, dict) else Path()
-            # Construct path relative to where the markdown was stored
-            # The markdown is under derived/cache/json/<relative_path>
-            # We need to find it - let's use the artifact_rel to locate it
-            artifact_parts = md_path_rel.split("/")
-            # The markdown is at derived/cache/json/<original_relative_path>.md
-            # For now, return the content as-text category and let the pipeline handle it
-            # Actually, let's read it from the derived cache
-            cache_md = Path(str(env.get("DERIVED_DIR", "./derived"))) / "cache" / "json" / Path(md_path_rel)
-            if cache_md.is_file():
-                content = cache_md.read_text(encoding="utf-8", errors="replace")
-            else:
-                # Fallback: generate on the fly using the transform function
-                # We already transformed it, so let's just return the original JSON as content
-                # but mark it so the pipeline knows it's been transformed
-                content = raw
-                category = "json"
-            return content, None
-
-    # ── Original logic for other extensions ────────────────────────────────
     if ext in TEXT_EXT:
         return read_text_file(path), None
     if ext in PDF_EXT or ext in IMAGE_EXT:

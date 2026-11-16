@@ -12,12 +12,12 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "mcp") not in sys.path:
     sys.path.insert(0, str(ROOT / "mcp"))
 
-from bin.url_importer import (
+from url_importer import (
     sanitize_slug,
     format_media_markdown,
     import_media_url_to_kb,
 )
-from bin.ragcli import build_parser
+from ragcli import build_parser
 from kb_router import KBRouter, build_mcp_server
 
 
@@ -55,8 +55,8 @@ def test_import_media_url_to_kb(tmp_path, monkeypatch):
         "port": 9621,
     }
 
-    monkeypatch.setattr("bin.url_importer.find_kb", lambda reg, name: fake_kb if name == "test-kb" else None)
-    monkeypatch.setattr("bin.url_importer.load_registry", lambda env: [fake_kb])
+    monkeypatch.setattr("url_importer.find_kb", lambda reg, name: fake_kb if name == "test-kb" else None)
+    monkeypatch.setattr("url_importer.load_registry", lambda env: [fake_kb])
 
     fake_ydl = MagicMock()
     def fake_extract_info(url, download=True):
@@ -87,7 +87,7 @@ def test_import_media_url_to_kb(tmp_path, monkeypatch):
             "audio_path": dummy_audio,
         }
 
-    monkeypatch.setattr("bin.url_importer.extract_media_stream", fake_extract_stream)
+    monkeypatch.setattr("url_importer.extract_media_stream", fake_extract_stream)
 
     res = import_media_url_to_kb(
         kb_name="test-kb",

@@ -10,7 +10,9 @@ from typing import Any
 import requests
 from fastmcp import FastMCP
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
+# Running as a script: expose src/ and src/cli/ so kb_registry and mcp.memories import.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cli"))
 from kb_registry import find_kb, load_registry  # noqa: E402
 from mcp.memories import (  # noqa: E402
     deprecate_memory_by_id,

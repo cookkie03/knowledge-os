@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from bin.ragcli import build_parser
+from ragcli import build_parser
 
 
 def test_ragcli_memory_cli_commands():
@@ -21,7 +21,7 @@ def test_ragcli_memory_cli_commands():
             ]
         }
 
-        with patch("bin.ragcli.load_registry", return_value=mock_reg):
+        with patch("ragcli.load_registry", return_value=mock_reg):
             # 1. remember command
             args = parser.parse_args([
                 "memory", "remember", "test-agent-kb", "Scelta di design: REST API",
@@ -65,7 +65,7 @@ def test_ragcli_import_archive_cli():
             ]
         }
 
-        with patch("bin.ragcli.load_registry", return_value=mock_reg):
+        with patch("ragcli.load_registry", return_value=mock_reg):
             args = parser.parse_args(["import-archive", "import-kb", str(archive_dir)])
             args.func(args)
 

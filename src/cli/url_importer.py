@@ -21,7 +21,7 @@ try:
 except ImportError:
     yt_dlp = None
 
-from bin.kb_registry import find_kb, global_env, load_registry
+from kb_registry import find_kb, global_env, load_registry
 from pipeline.parsers import parse_audio_document
 
 
@@ -31,10 +31,14 @@ class MediaImportError(Exception):
 
 
 # Sanitize a string into a safe filename slug.
-# Strips non-alphanumeric characters to prevent path traversal or filesystem incompatibilities.
-# The slug is safe to use as part of a filesystem path; reserved windows names
-# and leading dots are not filtered here because the downstream path-validate
-# step already blocks traversal and absolute paths.
+#
+# What this does: converts arbitrary text into a safe filesystem slug by stripping
+# non-alphanumeric characters (except hyphens and spaces), lowercasing, and collapsing
+# consecutive separators into single hyphens. The resulting slug is safe to use as
+# part of a filesystem path. Sanitization prevents path traversal and filesystem
+# incompatibility issues while preserving readability of the original text.
+# Inputs/Outputs: text (str to sanitize), max_length (int, default 80) -> str
+# sanitized slug (max max_length chars, or "media-item" if result is empty)
 def sanitize_slug(text: str, max_length: int = 80) -> str:
     cleaned = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE).strip().lower()
     slug = re.sub(r"[-\s]+", "-", cleaned)
@@ -42,7 +46,15 @@ def sanitize_slug(text: str, max_length: int = 80) -> str:
 
 
 # Extract audio and metadata from a media URL using yt-dlp.
-# Downloads audio stream to temporary directory and returns metadata dict with local file path.
+#
+# What this does: downloads audio from a media URL using yt-dlp, saves to a temporary
+# directory with a template based on the video ID and extension, and returns metadata
+# dict with the local file path and extraction details. Uses yt_dlp library (or raises
+# MediaImportError if not available). The download is configured for best audio format
+# with post-processing to ensure compatible output.
+# Inputs/Outputs: url (str media URL), output_dir (Path directory to save to),
+# ydl_client (optional yt_dlp client) -> dict with metadata including "path" to
+# downloaded audio file, "title", "uploader", "duration", "ext", "id"
 def extract_media_stream(
     url: str,
     output_dir: Path,

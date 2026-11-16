@@ -1,7 +1,7 @@
 import argparse
 import pytest
-from bin.ragcli import cmd_config_show, cmd_config_set, build_parser
-from bin.kb_registry import global_env, upsert_global_env
+from ragcli import cmd_config_show, cmd_config_set, build_parser
+from kb_registry import global_env, upsert_global_env
 
 
 def test_config_show_runs_cleanly(capsys):
@@ -20,7 +20,7 @@ def test_config_set_toggles_pipeline_and_models(tmp_path, monkeypatch, capsys):
 
     import kb_registry
     monkeypatch.setattr(kb_registry, "CONFIG", test_env)
-    monkeypatch.setattr("bin.kb_registry.CONFIG", test_env)
+    monkeypatch.setattr("kb_registry.CONFIG", test_env)
 
     parser = build_parser()
     args = parser.parse_args([

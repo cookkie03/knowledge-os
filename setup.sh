@@ -129,7 +129,8 @@ kb_exists() {
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path("bin").resolve()))
+sys.path.insert(0, str(Path("src").resolve()))
+sys.path.insert(0, str(Path("src/cli").resolve()))
 from kb_registry import find_kb, load_registry  # noqa: E402
 
 name = sys.argv[1]
@@ -143,7 +144,8 @@ write_public_kb_env() {
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path("bin").resolve()))
+sys.path.insert(0, str(Path("src").resolve()))
+sys.path.insert(0, str(Path("src/cli").resolve()))
 from kb_registry import find_kb, global_env, load_registry, write_kb_env  # noqa: E402
 
 name = sys.argv[1]
@@ -260,7 +262,7 @@ fi
 
 if [ "$OS_NAME" = "Linux" ]; then
   echo "==> Installing systemd --user units"
-  "$ENGINE_PY" bin/ragcli.py service install-units
+  "$ENGINE_PY" src/cli/ragcli.py service install-units
   systemctl --user daemon-reload
   if [ -f "$HOME/.config/systemd/user/lightrag-dreaming.timer" ]; then
     systemctl --user enable --now lightrag-dreaming.timer

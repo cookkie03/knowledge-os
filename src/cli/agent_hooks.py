@@ -15,17 +15,24 @@ import sys
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-if str(ROOT / "bin") not in sys.path:
-    sys.path.insert(0, str(ROOT / "bin"))
+# ROOT is the repository root: src/cli/agent_hooks.py -> src/cli -> src -> repo.
+ROOT = Path(__file__).resolve().parent.parent.parent
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+if str(ROOT / "src" / "cli") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src" / "cli"))
 
 from kb_registry import find_kb, load_registry  # noqa: E402
-from mcp.memories import query_memories, remember_memory  # noqa: E402
+from pipeline.dreaming import query_memories, remember_memory  # noqa: E402
 
 
 # Query KB active memories matching the prompt and format an injection context block.
+#
+# What this does: queries the KB registry for active memories matching the given kb_name and prompt,
+# retrieves active preferences first, then query-matched decisions and facts, combines them removing
+# duplicates, and formats them into a project_memory XML block for pre-prompt context injection.
+# Inputs/Outputs: kb_name (str), prompt (str), max_items (int, default 5) -> str formatted context block
+# (empty string if no memories found)
 def inject_pre_prompt_context(kb_name: str, prompt: str, max_items: int = 5) -> str:
     reg = load_registry()
     kb_info = find_kb(reg, kb_name)
@@ -68,6 +75,13 @@ def inject_pre_prompt_context(kb_name: str, prompt: str, max_items: int = 5) -> 
 
 
 # Parse a session transcript or text, extract key decisions or facts, and save episodic/decision memory.
+#
+# What this does: loads the KB registry and finds the KB info, reads transcript text (from file or
+# raw_text parameter), extracts salient lines from the first 5 non-empty lines as a summary preview,
+# generates a title from the session ID and preview, and saves the full text as episodic memory
+# using the remember_memory function.
+# Inputs/Outputs: kb_name (str), transcript_path (optional Path), raw_text (optional str),
+# session_id (optional str) -> dict with status, memory_id, and title
 def capture_post_session(
     kb_name: str,
     transcript_path: Path | str | None = None,
@@ -112,6 +126,13 @@ def capture_post_session(
 
 
 # Configure project-level memory hooks or instructions for supported coding agents.
+#
+# What this does: configures memory hook instructions for a specified client type (claude-code,
+# cursor, codex, or antigravity) in the project directory. For each client, creates the appropriate
+# configuration file (settings.json, rules/agent-memory.mdc, instructions.md, or GEMINI.md) with
+# memory injection and capture commands. Supports incremental update of existing files.
+# Inputs/Outputs: client (str, default "claude-code"), kb_name (str, default "agent-memory"),
+# target_project_dir (optional Path) -> dict with status, configured_file, and hooks/info
 def install_client_hook(
     client: str = "claude-code",
     kb_name: str = "agent-memory",
@@ -243,6 +264,7 @@ def install_client_hook(
     }
 
 
+# Parse CLI arguments and dispatch memory hook actions (inject, capture, install).
 def main() -> None:
     parser = argparse.ArgumentParser(description="Agent Hooks for Memory Injection and Capture")
     subparsers = parser.add_subparsers(dest="action")

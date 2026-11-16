@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from bin.ragcli import build_parser
+from ragcli import build_parser
 from pipeline.dreaming import remember_memory
 
 
@@ -15,7 +15,7 @@ def test_retrieve_hierarchical_parser_has_memory_and_url():
 
 
 def test_memory_scope_defaults_to_all_kbs(tmp_path, monkeypatch, capsys):
-    from bin import ragcli
+    import ragcli
     kb_a = tmp_path / "a"
     kb_b = tmp_path / "b"
     remember_memory(kb_a, "alpha shared fact", title="A")

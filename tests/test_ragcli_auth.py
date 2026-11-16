@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT / "bin") not in sys.path:
-    sys.path.insert(0, str(ROOT / "bin"))
-
 import kb_registry
-from bin.ragcli import cmd_auth_clear, cmd_auth_generate, cmd_auth_set, cmd_auth_show
+from ragcli import cmd_auth_clear, cmd_auth_generate, cmd_auth_set, cmd_auth_show
 
 
 def test_ragcli_auth_lifecycle(tmp_path: Path, monkeypatch) -> None:
@@ -17,7 +12,7 @@ def test_ragcli_auth_lifecycle(tmp_path: Path, monkeypatch) -> None:
     env_file.write_text("MCP_BIND_HOST=127.0.0.1\nMCP_BIND_PORT=8743\n", encoding="utf-8")
 
     monkeypatch.setattr(kb_registry, "CONFIG", env_file)
-    monkeypatch.setattr("bin.ragcli._restart_mcp_service_if_active", lambda: None)
+    monkeypatch.setattr("ragcli._restart_mcp_service_if_active", lambda: None)
 
     # 1. Initially disabled
     assert not kb_registry.global_env().get("MCP_AUTH_TOKEN")

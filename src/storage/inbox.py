@@ -28,8 +28,8 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-if str(ROOT / "bin") not in sys.path:
-    sys.path.insert(0, str(ROOT / "bin"))
+if str(ROOT / "src" / "cli") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src" / "cli"))
 
 from kb_registry import global_env
 from pipeline.parsers import validate_safe_relative_path
@@ -273,7 +273,7 @@ def consume_inbox(
     dirs = get_inbox_dirs(kb)
     port = int(kb.get("port", env.get("BASE_PORT", 9621)))
 
-    from bin.ingest import insert_text, render_content  # Lazy import to avoid circular dependencies
+    from ingest import insert_text, render_content  # Lazy import to avoid circular dependencies
 
     batches_to_run: list[Path] = []
     if specific_job_id:

@@ -9,15 +9,16 @@ import tempfile
 
 import yaml
 
-HOME = Path(__file__).resolve().parent.parent
+# HOME is the repository root: src/cli/kb_registry.py -> src/cli -> src -> repo.
+HOME = Path(__file__).resolve().parent.parent.parent
 CONFIG = HOME / "config" / "global.env"
 REGISTRY = HOME / "config" / "registry.yaml"
 KB_ROOT = HOME / "kb"
 ENGINE_DIR = HOME / ".venv"
 ENGINE_PYTHON = ENGINE_DIR / "bin" / "python"
 LIGHTRAG_SERVER = ENGINE_DIR / "bin" / "lightrag-server"
-MCP_SCRIPT = HOME / "mcp" / "lightrag_mcp.py"
-INGEST_SCRIPT = HOME / "bin" / "ingest.py"
+MCP_SCRIPT = HOME / "src" / "mcp" / "lightrag_mcp.py"
+INGEST_SCRIPT = HOME / "src" / "cli" / "ingest.py"
 
 DERIVED_SUBDIRS = ("text", "pdf", "images", "office", "audio", "cache", "manifests")
 
