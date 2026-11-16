@@ -21,7 +21,13 @@ VALID_MEMORY_STATUSES = {"active", "superseded", "deprecated"}
 
 
 def utc_now_iso() -> str:
-    """Return timezone-aware UTC ISO timestamp."""
+    """Return timezone-aware UTC ISO timestamp.
+
+    What this does: returns the current time in ISO 8601 format with timezone awareness
+    (UTC). Used for consistent timestamping across all memory operations.
+
+    Inputs/Outputs: none -> str UTC ISO timestamp string
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -411,6 +417,15 @@ def compact_episodic_memories(
 
 
 # Execute the Dreaming (consolidation) cycle on a KB source directory.
+#
+# What this does: runs the full dreaming/consolidation cycle on a KB's memories, which performs
+# contradiction detection between decisions, marks conflicting older decisions as superseded, and
+# compacts episodic memories to reduce redundancy. The cycle preserves active memories while
+# appropriately marking outdated or conflicting ones. Runs in two phases: (1) resolve conflicts
+# and supersede older decisions, (2) compact episodic logs.
+# Inputs/Outputs: source_dir (Path|str, KB source directory), dry_run (bool, default False) ->
+# dict with total_memories count, superseded_decisions count, details of superseded records,
+# episodic_compaction results, and dry_run flag
 def run_dreaming_cycle(source_dir: Path | str, dry_run: bool = False) -> dict[str, Any]:
     source_path = Path(source_dir).resolve()
     memories = load_kb_memories(source_path)

@@ -1,13 +1,21 @@
+#!/usr/bin/env python3
+"""Run the ingestion pipeline for a KB.
+
+This module now delegates to the centralized ingest_pipeline module for
+all ingestion operations. This ensures that all consumers use the same
+pipeline logic with centralized path validation, atomic writes, and
+safety guards.
+
+Deprecated: Use ingest_pipeline.run_ingest_pipeline instead.
+"""
+
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 from pathlib import Path
 
 HOME = Path(__file__).resolve().parent.parent
-ENGINE_DIR = HOME / ".venv"
-INGEST_SCRIPT = HOME / "bin" / "ingest.py"
 
 
 def run_ingest(
@@ -22,47 +30,22 @@ def run_ingest(
     no_audio: bool = False,
     background: bool = True,
 ) -> dict:
-    """Run the ingestion pipeline for a KB."""
-    engine_python = ENGINE_DIR / "bin" / "python"
-    if not engine_python.exists():
-        engine_python = Path("python3")
+    """Run the ingestion pipeline for a KB.
 
-    cmd = [str(engine_python), str(INGEST_SCRIPT), "--kb", kb_name]
+    Deprecated: Use ingest_pipeline.run_ingest_pipeline instead.
+    This function delegates to the centralized pipeline for consistency.
+    """
+    from src.cli.ingest_pipeline import run_ingest_pipeline
 
-    if force:
-        cmd.append("--force")
-    if pipelines:
-        cmd.extend(["--pipelines", pipelines])
-    if no_text:
-        cmd.append("--no-text")
-    if no_pdf:
-        cmd.append("--no-pdf")
-    if no_images:
-        cmd.append("--no-images")
-    if no_office:
-        cmd.append("--no-office")
-    if no_audio:
-        cmd.append("--no-audio")
-    if source_folder:
-        cmd.extend(["--source-folder", source_folder])
-
-    if background:
-        # Run in background
-        log_path = Path(f"./data/{kb_name}/ingest.log")
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(
-            cmd,
-            stdout=log_path.open("a"),
-            stderr=log_path.open("a"),
-            start_new_session=True,
-        )
-        return {"ok": True, "status": "queued", "command": " ".join(cmd)}
-    else:
-        # Run synchronously
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return {
-            "ok": result.returncode == 0,
-            "status": "completed" if result.returncode == 0 else "failed",
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
+    return run_ingest_pipeline(
+        kb_name=kb_name,
+        source_folder=source_folder,
+        force=force,
+        pipelines=pipelines,
+        no_text=no_text,
+        no_pdf=no_pdf,
+        no_images=no_images,
+        no_office=no_office,
+        no_audio=no_audio,
+        background=background,
+    )

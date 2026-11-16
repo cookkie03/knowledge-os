@@ -7,6 +7,16 @@ from pathlib import Path
 
 
 # Build a snapshot that marks uncertain scans incomplete to prevent false deletes.
+#
+# What this does: creates a snapshot of files in a folder without following symlinks,
+# reporting any scan errors. The critical invariant is that any scan error (missing file,
+# broken symlink, changed file, or a folder that moved during traversal) forces
+# scan_complete to False. The caller treats an incomplete scan as "do not delete anything",
+# so a partial or failing enumeration can never imply a deletion that the client did not
+# explicitly authorize. This safety guard ensures clients never accidentally delete files
+# they didn't intend to.
+# Inputs/Outputs: folder (Path to scan) -> dict with "files" list, "scan_complete" bool,
+# "scan_errors" list of error strings
 def snapshot(folder):
     """Enumerate regular files without following symlinks and report scan errors.
 

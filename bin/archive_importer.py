@@ -29,9 +29,14 @@ class ArchiveSecurityError(RuntimeError):
 
 
 # Check destination containment to block directory traversal / Zip-Slip attacks.
-# Invariant: the resolved destination must always be a descendant of the
-# resolved target directory; this prevents a Zip-Slip attack where a filename
-# like "../../../etc/passwd" causes extraction outside the intended folder.
+#
+# What this does: validates that the resolved destination path is always a descendant of the
+# resolved target directory, preventing Zip-Slip attacks where filenames like
+# "../../../etc/passwd" cause extraction outside the intended folder. Uses os.path.commonpath
+# to verify containment, catching ValueError/OSError and returning False to reject unsafe entries.
+# This is a critical security guard at the extraction trust boundary.
+# Inputs/Outputs: target_dir (Path to extract into), dest_path (Path of extracted file) -> bool
+# True if safe (dest is descendant of target), False if unsafe or on error
 def _is_safe_extraction_path(target_dir: Path, dest_path: Path) -> bool:
     try:
         resolved_target = target_dir.resolve()
@@ -44,10 +49,15 @@ def _is_safe_extraction_path(target_dir: Path, dest_path: Path) -> bool:
 
 
 # Unpack a zip archive strictly inside target_dir with decompression and path guards.
-# All safety checks are intentional blockers: symlinks, traversal, absolute
-# paths, size limits, total byte limits, and unsafe compression ratios defend
-# against Zip-Slip, zip bombs, and path traversal. Each guard raises
-# ArchiveSecurityError on violation so the caller knows exactly what failed.
+#
+# What this does: extracts a zip archive into target_dir with multiple safety guards
+# against Zip-Slip, zip bombs, symlinks, size limits, total byte limits, and unsafe
+# compression ratios. Each guard raises ArchiveSecurityError on violation so the
+# caller knows exactly what failed. The invariant is that all extracted files must
+# remain within target_dir; any path traversal attempt triggers an immediate security
+# error.
+# Inputs/Outputs: zip_path (Path to zip archive), target_dir (Path to extract into) ->
+# list[Path] of successfully extracted files, raises ArchiveSecurityError on violation
 def safe_extract_zip(zip_path: Path | str, target_dir: Path | str) -> list[Path]:
     zip_path = Path(zip_path).resolve()
     target_dir = Path(target_dir).resolve()

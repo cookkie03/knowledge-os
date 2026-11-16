@@ -22,7 +22,7 @@ if str(ROOT / "bin") not in sys.path:
     sys.path.insert(0, str(ROOT / "bin"))
 
 from kb_registry import find_kb, load_registry  # noqa: E402
-from pipeline.dreaming import query_memories, remember_memory  # noqa: E402
+from mcp.memories import query_memories, remember_memory  # noqa: E402
 
 
 # Query KB active memories matching the prompt and format an injection context block.

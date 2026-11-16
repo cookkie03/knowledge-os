@@ -74,6 +74,11 @@ LINUX_SYSTEMD_UNITS = (
 
 def _completed_process(args: list[str], returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=args, returncode=returncode, stdout=stdout, stderr=stderr)
+#
+# What this does: creates a synthetic CompletedProcess object for testing purposes,
+# allowing tests to simulate subprocess results without actually running commands.
+# Inputs/Outputs: args (list of command args), returncode (int), stdout (str, default ""),
+# stderr (str, default "") -> CompletedProcess instance
 
 
 def _normalize_service_name(name: str) -> str:
@@ -83,10 +88,18 @@ def _normalize_service_name(name: str) -> str:
     if "." not in normalized:
         normalized = f"{normalized}.service"
     return normalized
+#
+# What this does: normalizes a service name by stripping whitespace and ensuring it has a .service
+# extension. If the name is empty, exits the program. If no dot is present, appends .service.
+# Inputs/Outputs: name (str) -> normalized str with .service suffix
 
 
 def _systemd_user_dir() -> Path:
     return Path.home() / ".config" / "systemd" / "user"
+#
+# What this does: returns the path to the user-level systemd config directory
+# (~/.config/systemd/user). This is where user-specific systemd units are installed.
+# Inputs/Outputs: none -> Path to the user systemd directory
 
 
 def _configured_public_kb(env: dict[str, str]) -> str | None:
@@ -98,6 +111,10 @@ def _configured_public_kb(env: dict[str, str]) -> str | None:
     except Exception:
         return None
     return kb_name if find_kb(registry, kb_name) else None
+#
+# What this does: checks the environment dict for a PUBLIC_MCP_KB setting, validates it exists
+# in the registry, and returns the kb name if found. Used to determine if a public KB is configured.
+# Inputs/Outputs: env (dict of environment variables) -> str|None knowledge base name or None
 
 
 def _status_linux_units(env: dict[str, str] | None = None) -> list[str]:
@@ -110,6 +127,11 @@ def _status_linux_units(env: dict[str, str] | None = None) -> list[str]:
             f"lightrag-mcp@{public_kb}.service",
         ]
     return list(LINUX_SYSTEMD_UNITS)
+#
+# What this does: returns the list of Linux systemd user service units based on whether a public
+# knowledge base is configured. If a public KB exists, returns KB-specific service names; otherwise
+# returns the default LINUX_SYSTEMD_UNITS tuple.
+# Inputs/Outputs: env (optional dict) -> list of service unit name strings
 
 
 def _manageable_linux_units(env: dict[str, str] | None = None) -> list[str]:
@@ -123,6 +145,11 @@ def _manageable_linux_units(env: dict[str, str] | None = None) -> list[str]:
             f"lightrag-mcp@{public_kb}.service",
         ]
     return units
+#
+# What this does: returns the list of manageable Linux systemd user service units based on whether
+# a public knowledge base is configured. Includes KB-specific services when a public KB is set,
+# otherwise returns default units. Used for service management operations.
+# Inputs/Outputs: env (optional dict) -> list of service unit name strings
 
 
 def _unit_template_context(repo_root: Path, home: Path, env: dict[str, str]) -> dict[str, str]:
@@ -132,6 +159,11 @@ def _unit_template_context(repo_root: Path, home: Path, env: dict[str, str]) -> 
         "__LIGHTRAG_SERVER_BIN__": env["LIGHTRAG_SERVER_BIN"],
         "__HOME__": str(home),
     }
+#
+# What this does: creates a template context dictionary with repository root, engine Python path,
+# lightrag server binary path, and home directory. Used when generating systemd unit files
+# with substituted tokens.
+# Inputs/Outputs: repo_root (Path), home (Path), env (dict) -> dict of template token values
 
 
 def install_user_units(repo_root: Path, home: Path, env: dict[str, str] | None = None) -> list[Path]:
@@ -156,6 +188,12 @@ def install_user_units(repo_root: Path, home: Path, env: dict[str, str] | None =
         dst.write_text(text)
         installed.append(dst)
     return installed
+#
+# What this does: installs user-level systemd unit files from the deploy/systemd directory into
+# the user's systemd config directory. Copies unit files, substitutes template tokens with
+# environment values, and supports optional dreaming timer/service additions. Returns list of
+# installed file paths.
+# Inputs/Outputs: repo_root (Path), home (Path), env (optional dict) -> list of installed Path objects
 
 
 def configure_tailscale_funnel(bind_host: str, bind_port: str, public_port: str) -> list[list[str]]:
@@ -171,6 +209,16 @@ def _systemctl_user(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:
         return _completed_process(cmd, 127, stderr="systemctl not found")
+#
+# What this does: runs systemctl --user commands and returns the result. Provides a wrapper
+# that handles the FileNotFoundError if systemctl is not available, returning a completed process
+# with return code 127 and stderr message. Used as a base for other systemd status functions.
+# Inputs/Outputs: *args (str) -> CompletedProcess with return code and output
+#
+# What this this does: runs systemctl --user commands and returns the result. Provides a wrapper
+# that handles the FileNotFoundError if systemctl is not available, returning a completed process
+# with return code 127 and stderr message.
+# Inputs/Outputs: *args (str) -> CompletedProcess with return code and output
 
 
 def _journalctl_user(*args: str) -> subprocess.CompletedProcess[str]:

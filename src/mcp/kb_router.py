@@ -43,10 +43,15 @@ if str(ROOT / "bin") not in sys.path:
     sys.path.insert(0, str(ROOT / "bin"))
 
 from kb_registry import find_kb, global_env, load_registry, storage_mode  # noqa: E402
-from pipeline.dreaming import (  # noqa: E402
+from mcp.memories import (  # noqa: E402
     deprecate_memory_by_id,
     query_memories,
     remember_memory,
+    compact_episodic_memories,
+    find_conflicting_decisions,
+    run_dreaming_cycle,
+    serialize_memory_frontmatter,
+    write_memory_record,
 )
 from storage.catalog import Catalog, DEFAULT_KB_ROOT  # noqa: E402
 from storage.inbox import get_inbox_status, queue_inbox_send, spawn_detached_job
@@ -687,7 +692,7 @@ class KBRouter:
             return _serialize({
                 "status": "ok",
                 "kb": kb,
-                "memory": mem.to_dict(),
+                "memory": mem.to_dict() if hasattr(mem, "to_dict") else mem,
             })
         except Exception as exc:
             return _serialize({
@@ -726,7 +731,7 @@ class KBRouter:
                 "status": "ok",
                 "kb": kb,
                 "count": len(results),
-                "memories": [m.to_dict() for m in results],
+                "memories": [m.to_dict() if hasattr(m, "to_dict") else m for m in results],
             })
         except Exception as exc:
             return _serialize({
@@ -769,7 +774,7 @@ class KBRouter:
             return _serialize({
                 "status": "ok",
                 "kb": kb,
-                "memory": updated.to_dict(),
+                "memory": updated.to_dict() if hasattr(updated, "to_dict") else updated,
             })
         except Exception as exc:
             return _serialize({

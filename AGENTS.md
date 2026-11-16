@@ -6,7 +6,7 @@ Use Graphify to retrieve relevant parts of the codebase whenever a user raises a
 
 ## Comments
 
-Use Redis-style comments to explain the purpose of functions, classes, decorators and complex loops, including invariants and rationale.
+Use comments to explain the purpose of functions, classes, decorators and complex loops, including invariants and rationale.
 
 - Place a concise comment immediately before each function, class and decorator definition; avoid merely repeating its name.
 - Explain why a decision was made, especially for security, data integrity, constraints and non-obvious edge cases. Do not narrate obvious statements.

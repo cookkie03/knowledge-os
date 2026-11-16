@@ -9,6 +9,14 @@ from sync.client import diff
 
 
 # Serialize job creation with the source snapshot and active-job check.
+#
+# What this does: creates one source-bound job and returns the authoritative comparison snapshot.
+# The returned snapshot is the single source of truth the client must match: it embeds the scan
+# generation so a stale client snapshot is rejected at admit time, and it is produced under the
+# catalog transaction together with the job row so a concurrent prepare cannot observe a half-written job.
+# Inputs/Outputs: catalog, kb_id, source_id, mode, job_id -> dict with job_id, kb, source,
+# scan_generation, origin_host, origin_folder, deletion_policy, and files list with path, sha256,
+# size, mtime_ns
 def prepare_sync(catalog, kb_id, source_id, mode, job_id):
     """Create one source-bound job and return the authoritative comparison snapshot.
 

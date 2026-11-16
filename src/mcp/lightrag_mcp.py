@@ -12,6 +12,16 @@ from fastmcp import FastMCP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 from kb_registry import find_kb, load_registry  # noqa: E402
+from mcp.memories import (  # noqa: E402
+    deprecate_memory_by_id,
+    query_memories,
+    remember_memory,
+    compact_episodic_memories,
+    find_conflicting_decisions,
+    run_dreaming_cycle,
+    serialize_memory_frontmatter,
+    write_memory_record,
+)
 
 STRATEGY_TO_MODE = {
     "balanced": "mix",

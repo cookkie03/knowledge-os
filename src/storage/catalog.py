@@ -15,19 +15,40 @@ VALID_SOURCE_MODES = {"full_folder", "selected_files"}
 # Every stage a job can be in; used to gate transitions and to detect active jobs.
 VALID_JOB_STAGES = {"PREPARING", "TRANSFERRING", "VALIDATING", "PROCESSING", "COMPLETED", "FAILED_RETRYABLE", "FAILED_FINAL", "NEEDS_REVIEW"}
 DEFAULT_JOB_COUNTERS = dict.fromkeys(("added", "modified", "renamed", "deleted", "unchanged", "failed", "warnings"), 0)
+#
+# What this does: defines the catalog module for managing a single KB's sources, file
+# occurrences, documents, and jobs using JSON storage. Specifies the valid source modes
+# (full_folder or selected_files), valid job stages, and default job counters. The
+# module provides operations for creating, updating, and tracking sources and jobs
+# within a KB.
+# Inputs/Outputs: constants used across catalog operations for source and job management
 
 
 def utc_now_iso():
-    """Return a timezone-aware timestamp for catalog records."""
+    """Return a timezone-aware timestamp for catalog records.
+
+    What this does: returns the current time in ISO 8601 format with UTC timezone awareness,
+    used for consistent timestamping across all catalog records (created_at, updated_at, etc.).
+
+    Inputs/Outputs: none -> str ISO 8601 timezone-aware timestamp string
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
 def generate_canonical_doc_id(binary_sha256, revision=1):
-    """Derive a synthetic source identifier without exposing the original filename.
+    r"""Derive a synthetic source identifier without exposing the original filename.
 
     The ID is content-stable: the same binary always maps to the same ID, and a
     revision suffix distinguishes re-inserted content so the old record can be
     retired instead of mutated in place.
+
+    What this does: creates a content-stable document ID from a binary SHA-256 hash.
+    The first 16 characters of the lowercased, stripped hash serve as a prefix.
+    A revision suffix (_rN) is added when revision > 1 to distinguish re-inserted
+    content, allowing the old record to be retired rather than mutated in place.
+
+    Inputs/Outputs: binary_sha256 (str, 64-char hex hash), revision (int, default 1) ->
+    str canonical doc ID like "doc_abcdef_r1" or "doc_empty_r2"
     """
     prefix = binary_sha256.strip().lower()[:16] or "empty"
     return f"doc_{prefix}_r{revision}" if revision > 1 else f"doc_{prefix}"
@@ -36,7 +57,18 @@ def generate_canonical_doc_id(binary_sha256, revision=1):
 def create_source_record(source_id, name, origin_host="", origin_folder="", mode="full_folder",
                          include_patterns=None, exclude_patterns=None, deletion_policy="guarded",
                          status="active", created_at=None, updated_at=None, last_complete_scan_id=None):
-    """Create a source record as a plain dict."""
+    """Create a source record as a plain dict.
+
+    What this does: creates a new source record dict with the provided parameters, using
+    the current timestamp if created_at is not supplied. The source record tracks a source
+    folder or file pattern set for a KB, including inclusion/exclusion patterns, deletion
+    policy, and status. The record is designed to be stored in JSON format alongside other
+    KB metadata.
+
+    Inputs/Outputs: all parameters are str or None except mode (str) and status (str),
+    include_patterns/exclude_patterns (optional lists), deletion_policy (str) -> dict
+    source record ready for JSON storage
+    """
     now = created_at or utc_now_iso()
     return {
         "id": source_id,
