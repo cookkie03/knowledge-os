@@ -33,7 +33,6 @@ from tools.memory import (
     run_dreaming_cycle,
 )
 from tools import ingest as ingest_tools
-from tools import migrate as migrate_tools
 from tools import services
 from tools.retrieval import Retrieval
 
@@ -508,27 +507,6 @@ def cmd_job(args: argparse.Namespace) -> None:
                  "state": job["stage"], **job["counters"]})
     if not ok:
         raise SystemExit(1)
-
-
-# Thin adapter over tools.migrate.run: one KB or all, dry run on request.
-def cmd_migrate(args: argparse.Namespace) -> None:
-    names = [args.name] if args.name else [kb["name"] for kb in load_registry(global_env())["kbs"]]
-    reports = []
-    for name in names:
-        try:
-            reports.append(migrate_tools.run(name, dry_run=args.dry_run))
-        except (ValueError, RuntimeError) as exc:
-            sys.exit(str(exc))
-    if getattr(args, "json", False):
-        print(json.dumps({"kbs": reports}, indent=2, ensure_ascii=False))
-        return
-    for report in reports:
-        src = report["sources"]
-        docs = report["documents"]
-        label = "dry run" if report["dry_run"] else "applied"
-        print(f"{report['kb']} ({label}): sources +{len(src['added'])} ={len(src['existing'])} "
-              f"conflicts {len(src['conflicts'])}; indexed docs {docs['indexed']}, "
-              f"unreconciled {len(docs['unreconciled'])}; backup {report['backup'] or '-'}")
 
 
 def cmd_move(args: argparse.Namespace) -> None:
@@ -1184,12 +1162,6 @@ def build_parser() -> argparse.ArgumentParser:
         loc.add_argument("--dry-run", action="store_true")
         loc.add_argument("--json", action="store_true")
         loc.set_defaults(func=cmd_move)
-
-    migrate = sub.add_parser("migrate", help="non-destructive migration of KB data to the Catalog")
-    migrate.add_argument("name", nargs="?", help="KB name (default: all KBs)")
-    migrate.add_argument("--dry-run", action="store_true", help="check everything, write nothing")
-    migrate.add_argument("--json", action="store_true")
-    migrate.set_defaults(func=cmd_migrate)
 
     move = sub.add_parser("move", help="move a KB's data between knowledge-os and a source folder")
     move.add_argument("name")
