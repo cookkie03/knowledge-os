@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -464,6 +465,24 @@ class Catalog:
             doc["lightrag_status"] = lightrag_status
             doc["updated_at"] = now
             return self._document(data, doc)
+
+    # Rewrite derived-artifact paths after a KB's derived directory moved.
+    # Documents store absolute extracted_artifact_path values; without this the
+    # recovery and replacement logic would look for artifacts at the old location.
+    # Only paths equal to or below old_prefix change (a sibling such as
+    # "<old>-other" is never touched), and the operation is idempotent and
+    # reversible by swapping the arguments. Returns the number of documents changed.
+    def rebase_artifact_paths(self, old_prefix, new_prefix):
+        old = str(Path(old_prefix).resolve())
+        new = str(Path(new_prefix).resolve())
+        changed = 0
+        with self._snapshot() as data:
+            for doc in data["documents"].values():
+                value = doc.get("extracted_artifact_path")
+                if value and (value == old or value.startswith(old + os.sep)):
+                    doc["extracted_artifact_path"] = new + value[len(old):]
+                    changed += 1
+        return changed
 
     def get_document(self, canonical_doc_id):
         """Retrieve a canonical document with its current active reference count."""

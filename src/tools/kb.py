@@ -15,6 +15,7 @@ from pathlib import PurePosixPath
 import yaml
 
 from tools.system import (
+    KB_ROOT,
     REGISTRY,
     atomic_write_text,
     global_env,
@@ -59,7 +60,9 @@ def normalize_kb(entry: dict, env: dict[str, str] | None = None) -> dict:
         raise ValueError(f"KB '{entry.get('name', '?')}' missing source_dir/source_folder")
     source_dir = Path(source_raw).expanduser().resolve()
     data_raw = entry.get("data_dir")
-    data_dir = Path(data_raw).expanduser().resolve() if data_raw else (source_dir / ".lightrag")
+    # Default location of a KB's data: kb/<name>/ inside knowledge-os (never inside
+    # the source folder unless the operator moves it there with set_data_location).
+    data_dir = Path(data_raw).expanduser().resolve() if data_raw else (KB_ROOT / entry["name"]).resolve()
     derived_dir = Path(entry.get("derived_dir") or (data_dir / "derived")).expanduser().resolve()
     rag_storage = Path(entry.get("rag_storage") or (data_dir / "rag_storage")).expanduser().resolve()
     return create_kb_entry(
@@ -401,3 +404,34 @@ def merged_runtime_env(kb: dict, env: dict[str, str] | None = None) -> dict[str,
     merged.update(env)
     merged.update(load_env(Path(kb["data_dir"]) / ".env"))
     return merged
+
+
+# Create and register a new KB whose data lives in knowledge-os (kb/<name>/).
+# Validates the source folder, refuses duplicate names and picks the next free
+# port. Side effects: creates the data directories, writes the per-KB runtime
+# env and saves the registry atomically. Returns the new KB dict.
+def add_kb(name: str, source_dir: str, port: int | None = None, env: dict[str, str] | None = None) -> dict:
+    env = env or global_env()
+    if not name or Path(name).name != name or name in {".", ".."} or "\\" in name:
+        raise ValueError(f"Invalid KB name: {name!r}")
+    registry = load_registry(env)
+    if find_kb(registry, name):
+        raise ValueError(f"KB '{name}' already exists.")
+    source = Path(source_dir).expanduser().resolve()
+    if not source.is_dir():
+        raise ValueError(f"Source directory does not exist: {source}")
+    data_dir = (KB_ROOT / name).resolve()
+    kb = create_kb_entry(
+        name=name,
+        source_dir=str(source),
+        data_dir=str(data_dir),
+        derived_dir=str(data_dir / "derived"),
+        rag_storage=str(data_dir / "rag_storage"),
+        port=int(port) if port else next_port(registry, env),
+        exclude=[],
+    )
+    ensure_kb_dirs(kb)
+    write_kb_env(kb, env)
+    registry["kbs"].append(kb)
+    save_registry(registry)
+    return kb
