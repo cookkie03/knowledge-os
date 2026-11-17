@@ -22,7 +22,7 @@ def _desired_sources(kb):
                         "name": Path(folder_path).name or folder_path, "path": folder_path,
                         "exclude": excludes})
     desired.append({"id": source_id_for("inbox"), "type": "inbox", "name": "inbox",
-                    "path": "", "exclude": []})
+                    "path": "", "exclude": [], "mode": "selected_files"})
     return desired
 
 
@@ -59,6 +59,7 @@ def migrate_registry_sources(kb, catalog, dry_run=True):
                     continue
             if not dry_run:
                 catalog.add_source(item["id"], item["name"], exclude_patterns=item["exclude"],
-                                   source_type=item["type"], path=item["path"])
+                                   source_type=item["type"], path=item["path"],
+                                   mode=item.get("mode", "full_folder"))
             report["added"].append(item["id"])
     return report

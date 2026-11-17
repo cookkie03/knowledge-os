@@ -9,9 +9,11 @@ escapes the real root.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 import stat
 import subprocess
+from collections import Counter
 
 
 def list_source_files(root, exclude_patterns=None):
@@ -194,3 +196,70 @@ def _matches_any(rel, patterns):
             if fnmatch.fnmatch(component, pattern):
                 return True
     return False
+
+# Hash the listed files of a source and report anything that could not be read.
+# Invariant: a file that cannot be read, or that changes while it is hashed,
+# becomes an error, and the caller must then treat the scan as incomplete so a
+# missing entry can never be mistaken for a deletion. Paths come from the
+# scanner, but each one is re-checked against the real root and symlinks are
+# refused again here, so a race that swaps a file for a link cannot escape.
+# Returns {"files": [{"path", "size", "mtime_ns", "sha256"}], "errors": [str]}.
+def hash_source_files(root, rel_paths):
+    root_real = os.path.realpath(root)
+    files = []
+    errors = []
+    for rel in rel_paths:
+        abs_path = os.path.join(root_real, rel)
+        try:
+            if os.path.islink(abs_path):
+                raise OSError("symlinks are not ingested")
+            if os.path.realpath(abs_path) != abs_path:
+                raise OSError("path resolves outside the source")
+            before = os.stat(abs_path)
+            digest = hashlib.sha256()
+            with open(abs_path, "rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            after = os.stat(abs_path)
+            # Re-stat after hashing: a file that changed mid-read is not a stable snapshot.
+            if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+                raise OSError("file changed during scan")
+            files.append({"path": rel, "size": after.st_size, "mtime_ns": after.st_mtime_ns,
+                          "sha256": digest.hexdigest()})
+        except OSError as exc:
+            errors.append("{}: {}".format(rel, exc))
+    return {"files": files, "errors": errors}
+
+
+# Plan file changes between the catalog state and a fresh snapshot.
+# When `complete` is False no delete is ever planned: an incomplete scan cannot
+# prove that a missing file was removed. Renames are inferred only for digests
+# that are unique in both snapshots and whose new path is an added file, so two
+# files that merely share content are never misattributed as a rename.
+def diff_snapshots(previous, current, complete):
+    old = {item["path"]: item for item in previous}
+    new = {item["path"]: item for item in current}
+    removed = set(old) - set(new) if complete else set()
+    added = set(new) - set(old)
+    modified = []
+    for path in sorted(set(old) & set(new)):
+        if old[path].get("sha256") != new[path].get("sha256"):
+            modified.append(path)
+    old_counts = Counter(item.get("sha256") for item in old.values())
+    new_counts = Counter(item.get("sha256") for item in new.values())
+    added_by_digest = {}
+    for path in added:
+        added_by_digest[new[path].get("sha256")] = path
+    renames = []
+    for old_path in sorted(removed):
+        digest = old[old_path].get("sha256")
+        if digest and old_counts[digest] == new_counts[digest] == 1 and digest in added_by_digest:
+            renames.append({"old": old_path, "new": added_by_digest[digest]})
+    # Entries consumed by a rename leave the add/delete sets so the caller does
+    # not also plan a redundant delete+add for the same content.
+    for item in renames:
+        removed.discard(item["old"])
+        added.discard(item["new"])
+    unchanged = sorted((set(old) & set(new)) - set(modified))
+    return {"add": sorted(added), "modify": modified, "rename": renames,
+            "delete": sorted(removed), "unchanged": unchanged}

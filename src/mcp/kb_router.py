@@ -800,15 +800,17 @@ class KBRouter:
             return _serialize({"error": "INBOX_SEND_FAILED", "kb": kb, "message": str(exc)})
 
     def inbox_consume(self, kb: str, job_id: str | None = None) -> str:
-        """Start asynchronous processing of pending inbox batches."""
+        """Start asynchronous processing of pending inbox batches.
+
+        All pending batches are processed in one pass by the single ingestion worker,
+        so job_id is accepted for compatibility but no longer selects a batch.
+        """
         try:
             record = self.get_kb(kb)
             if not record:
                 return _serialize({"error": "KB_NOT_FOUND", "kb": kb})
             engine_python = Path(global_env().get("ENGINE_PYTHON", sys.executable))
-            worker_cmd = [str(engine_python), str(ROOT / "src" / "cli" / "ragcli.py"), "_worker_consume", kb]
-            if job_id:
-                worker_cmd.extend(["--job", job_id])
+            worker_cmd = [str(engine_python), str(ROOT / "src" / "cli" / "ragcli.py"), "_worker_run", kb]
             log_path = Path(record["data_dir"]) / "inbox.log"
             pid = spawn_detached_job(worker_cmd, record["data_dir"], log_path, env=os.environ.copy())
             return _serialize({"ok": True, "status": "queued", "pid": pid, "job_id": job_id})

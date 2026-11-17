@@ -19,7 +19,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,10 +27,7 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-if str(ROOT / "src" / "cli") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src" / "cli"))
 
-from kb_registry import global_env
 from pipeline.parsers import validate_safe_relative_path
 
 logger = logging.getLogger("storage.inbox")
@@ -261,148 +257,91 @@ def queue_inbox_send(
             shutil.rmtree(stage_dir, ignore_errors=True)
 
 
-# Process pending batches in the inbox and insert parsed content into LightRAG.
-# Moves batches to processing/, parses supported document formats, inserts into
-# LightRAG server, and archives to processed/ (or failed/ on error).
-def consume_inbox(
-    kb: dict[str, Any],
-    specific_job_id: str | None = None,
-    env: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    env = env or global_env()
+# --- Intake queue lifecycle -------------------------------------------------------
+# The inbox is only an intake queue: it receives, stages and archives batches.
+# Indexing is done by the single ingestion worker (pipeline.orchestrator), which
+# claims a batch, feeds its files to the worker as one job, then archives it.
+
+# Return the ids of pending batches, oldest first, so intake order is preserved.
+def list_pending_batches(kb: dict[str, Any]) -> list[str]:
     dirs = get_inbox_dirs(kb)
-    port = int(kb.get("port", env.get("BASE_PORT", 9621)))
+    batches = [p for p in dirs["pending"].iterdir() if p.is_dir()]
+    batches.sort(key=lambda p: p.stat().st_mtime)
+    return [p.name for p in batches]
 
-    from ingest import insert_text, render_content  # Lazy import to avoid circular dependencies
 
-    batches_to_run: list[Path] = []
-    if specific_job_id:
-        target = dirs["pending"] / specific_job_id
-        if target.is_dir():
-            batches_to_run.append(target)
-    else:
-        batches_to_run = sorted(
-            [p for p in dirs["pending"].iterdir() if p.is_dir()],
-            key=lambda p: p.stat().st_mtime,
-        )
-
-    results: list[dict[str, Any]] = []
-    if batches_to_run:
-        logger.info(f"Starting inbox consume for '{kb.get('name')}' ({len(batches_to_run)} batch(es) queued)")
-
-    for batch in batches_to_run:
-        job_id = batch.name
-        proc_dir = dirs["processing"] / job_id
-
-        # Atomic transition: pending -> processing
-        try:
-            os.replace(batch, proc_dir)
-        except OSError as exc:
-            logger.warning(f"Could not lock batch {job_id} for processing: {exc}")
+# Move batches left in processing/ by a crashed run back to pending/.
+# Safe only because the caller holds the single-writer KB lock: no other worker
+# can legitimately own a processing batch at this point. Originals are never
+# deleted, so a crash cannot lose submitted files. Returns the recovered ids.
+def recover_stuck_batches(kb: dict[str, Any]) -> list[str]:
+    dirs = get_inbox_dirs(kb)
+    recovered = []
+    for stuck in sorted(dirs["processing"].iterdir()):
+        if not stuck.is_dir():
             continue
+        target = dirs["pending"] / stuck.name
+        if target.exists():
+            continue
+        os.replace(stuck, target)
+        update_inbox_job(kb, stuck.name, {"status": "queued", "recovered_at": utc_now_iso()})
+        recovered.append(stuck.name)
+    return recovered
 
-        logger.info(f"Processing inbox batch '{job_id}'")
-        update_inbox_job(kb, job_id, {
-            "status": "processing",
-            "started_at": utc_now_iso(),
-        })
 
-        manifest_file = proc_dir / "manifest.json"
-        manifest = {}
-        if manifest_file.is_file():
-            try:
-                manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-            except Exception:
-                manifest = {}
+# Atomically claim a pending batch (pending -> processing) and return its path.
+# Returns None if the batch vanished or the rename failed. The id is a single
+# directory name, never a path, so a crafted id cannot escape the inbox.
+def claim_batch(kb: dict[str, Any], job_id: str) -> Path | None:
+    if not job_id or job_id in {".", ".."} or Path(job_id).name != job_id or "\\" in job_id:
+        return None
+    dirs = get_inbox_dirs(kb)
+    source = dirs["pending"] / job_id
+    target = dirs["processing"] / job_id
+    if not source.is_dir():
+        return None
+    try:
+        os.replace(source, target)
+    except OSError as exc:
+        logger.warning("Could not claim inbox batch %s: %s", job_id, exc)
+        return None
+    update_inbox_job(kb, job_id, {"status": "processing", "started_at": utc_now_iso()})
+    return target
 
-        processed_files = []
-        errors = []
 
-        try:
-            for root_path, _, filenames in os.walk(proc_dir):
-                for filename in filenames:
-                    if filename == "manifest.json":
-                        continue
-                    file_path = Path(root_path) / filename
-                    rel_to_proc = file_path.relative_to(proc_dir)
-                    source_tag = f"inbox:{kb.get('name')}:{job_id}:{rel_to_proc}"
+# List a claimed batch's files as relative posix paths, skipping its manifest.
+# Symlinks are skipped: a batch is untrusted input and a link could point
+# outside the inbox.
+def list_batch_files(batch_dir: Path) -> list[str]:
+    files = []
+    for root_path, dirnames, filenames in os.walk(batch_dir, followlinks=False):
+        dirnames.sort()
+        for filename in sorted(filenames):
+            full = Path(root_path) / filename
+            rel = full.relative_to(batch_dir).as_posix()
+            if rel == "manifest.json" or full.is_symlink():
+                continue
+            files.append(rel)
+    return files
 
-                    try:
-                        content, _ = render_content(file_path, env)
-                        if content and content.strip():
-                            status = insert_text(port, content, source=source_tag)
-                            processed_files.append({"file": str(rel_to_proc), "status": status})
-                        else:
-                            processed_files.append({"file": str(rel_to_proc), "status": "empty_skipped"})
-                    except Exception as err:
-                        errors.append({"file": str(rel_to_proc), "error": str(err)})
 
-            if errors:
-                # Failure branch: move to failed/
-                dest_dir = dirs["failed"] / job_id
-                if dest_dir.exists():
-                    shutil.rmtree(dest_dir, ignore_errors=True)
-                os.replace(proc_dir, dest_dir)
-                err_report = {
-                    "job_id": job_id,
-                    "failed_at": utc_now_iso(),
-                    "errors": errors,
-                    "processed": processed_files,
-                }
-                (dest_dir / "error.json").write_text(
-                    json.dumps(err_report, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                rec = update_inbox_job(kb, job_id, {
-                    "status": "failed",
-                    "completed_at": utc_now_iso(),
-                    "errors": errors,
-                    "processed_count": len(processed_files),
-                })
-                logger.error(f"Failed inbox batch '{job_id}' with {len(errors)} error(s)")
-                results.append(rec)
-            else:
-                # Success branch: move to processed/
-                dest_dir = dirs["processed"] / job_id
-                if dest_dir.exists():
-                    shutil.rmtree(dest_dir, ignore_errors=True)
-                os.replace(proc_dir, dest_dir)
-                rec = update_inbox_job(kb, job_id, {
-                    "status": "completed",
-                    "completed_at": utc_now_iso(),
-                    "processed_count": len(processed_files),
-                    "files": processed_files,
-                })
-                logger.info(f"Completed inbox batch '{job_id}' ({len(processed_files)} file(s) processed)")
-                results.append(rec)
-
-        except Exception as unhandled_exc:
-            dest_dir = dirs["failed"] / job_id
-            if dest_dir.exists():
-                shutil.rmtree(dest_dir, ignore_errors=True)
-            if proc_dir.exists():
-                os.replace(proc_dir, dest_dir)
-            err_report = {
-                "job_id": job_id,
-                "failed_at": utc_now_iso(),
-                "error": str(unhandled_exc),
-                "traceback": traceback.format_exc(),
-            }
-            (dest_dir / "error.json").write_text(
-                json.dumps(err_report, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            rec = update_inbox_job(kb, job_id, {
-                "status": "failed",
-                "completed_at": utc_now_iso(),
-                "error": str(unhandled_exc),
-            })
-            logger.error(f"Unhandled exception processing inbox batch '{job_id}': {unhandled_exc}")
-            results.append(rec)
-
-    if batches_to_run:
-        logger.info(f"Inbox consume completed for '{kb.get('name')}': {len(results)} batch(es) processed")
-    return {"processed_batches": len(results), "jobs": results}
+# Archive a claimed batch: processing -> processed on success, -> failed with an
+# error.json report otherwise. The originals are always preserved in one of the
+# two archives, and the inbox job record is updated with the final status.
+def finish_batch(kb: dict[str, Any], job_id: str, ok: bool, details: dict[str, Any]) -> dict[str, Any]:
+    dirs = get_inbox_dirs(kb)
+    source = dirs["processing"] / job_id
+    destination = dirs["processed" if ok else "failed"] / job_id
+    if destination.exists():
+        shutil.rmtree(destination, ignore_errors=True)
+    if source.exists():
+        os.replace(source, destination)
+    if not ok and destination.exists():
+        report = {"job_id": job_id, "failed_at": utc_now_iso(), **details}
+        (destination / "error.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    updates = {"status": "completed" if ok else "failed", "completed_at": utc_now_iso()}
+    updates.update(details)
+    return update_inbox_job(kb, job_id, updates)
 
 
 # Return count and status breakdown of items across all inbox stages.

@@ -2,8 +2,9 @@
 
 import hashlib
 import os
-from collections import Counter
 from pathlib import Path
+
+from pipeline.source_scanner import diff_snapshots
 
 
 # Build a snapshot that marks uncertain scans incomplete to prevent false deletes.
@@ -80,33 +81,6 @@ def snapshot(folder):
     return {"files": sorted(files, key=lambda f: f["path"]), "scan_complete": not errors, "scan_errors": errors}
 
 
-def diff(previous, current, complete):
-    """Plan file changes; infer renames only for unique hashes in a complete scan.
-
-    When `complete` is False (an incomplete scan), deletions are refused
-    entirely: an incomplete scan means we cannot trust that a missing file was
-    actually removed, so we never plan a delete. Renames are inferred only for
-    digests that are unique in both snapshots, which prevents two files that
-    happen to share a hash from being misattributed as a rename.
-    """
-    old = {item["path"]: item for item in previous}
-    new = {item["path"]: item for item in current}
-    removed = set(old) - set(new) if complete else set()
-    added = set(new) - set(old)
-    modified = sorted(path for path in set(old) & set(new) if old[path].get("sha256") != new[path].get("sha256"))
-    old_counts = Counter(item.get("sha256") for item in old.values())
-    new_counts = Counter(item.get("sha256") for item in new.values())
-    renames = []
-    added_by_digest = {new[path].get("sha256"): path for path in added}
-    # A rename is safe to infer only when the digest is unique in both snapshots
-    # and its new occurrence is an added path, not an existing modified file.
-    for old_path in sorted(removed):
-        digest = old[old_path].get("sha256")
-        if digest and old_counts[digest] == new_counts[digest] == 1:
-            if digest in added_by_digest:
-                renames.append({"old": old_path, "new": added_by_digest[digest]})
-    # Entries consumed by a rename are removed from the add/delete sets so the
-    # caller does not also plan a redundant delete+add for the same content.
-    removed.difference_update(item["old"] for item in renames)
-    added.difference_update(item["new"] for item in renames)
-    return {"add": sorted(added), "modify": modified, "rename": renames, "delete": sorted(removed), "unchanged": sorted(set(old) & set(new) - set(modified))}
+# The delta planner now lives in pipeline.source_scanner (single implementation);
+# this alias keeps the legacy sync client working until ticket T9 removes it.
+diff = diff_snapshots

@@ -58,7 +58,6 @@ from pipeline.dreaming import (
     run_dreaming_cycle,
 )
 from storage.inbox import (
-    consume_inbox,
     get_inbox_dirs,
     get_inbox_status,
     load_inbox_jobs,
@@ -739,9 +738,9 @@ def cmd_inbox_send(args: argparse.Namespace) -> None:
         engine_python, _ = _ensure_runtime(env)
         ragcli_script = ROOT / "src" / "cli" / "ragcli.py"
         log_path = Path(kb["data_dir"]) / "inbox.log"
-        worker_cmd = [str(engine_python), str(ragcli_script), "_worker_consume", args.name]
+        worker_cmd = [str(engine_python), str(ragcli_script), "_worker_run", args.name]
         spawn_detached_job(worker_cmd, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
-        print("Consumo automatico avviato in background.")
+        print("Elaborazione automatica avviata in background.")
     print(f"Stato: ragcli inbox status {args.name}")
 
 
@@ -757,9 +756,7 @@ def cmd_inbox_consume(args: argparse.Namespace) -> None:
     engine_python, _ = _ensure_runtime(env)
     ragcli_script = ROOT / "src" / "cli" / "ragcli.py"
     log_path = Path(kb["data_dir"]) / "inbox.log"
-    worker_cmd = [str(engine_python), str(ragcli_script), "_worker_consume", args.name]
-    if getattr(args, "job", None):
-        worker_cmd.extend(["--job", args.job])
+    worker_cmd = [str(engine_python), str(ragcli_script), "_worker_run", args.name]
     pid = spawn_detached_job(worker_cmd, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
     print(f"Consumo inbox avviato in background per '{args.name}' (PID: {pid}).")
     print(f"Log: {log_path}")
@@ -926,13 +923,21 @@ def cmd_link_status(args: argparse.Namespace) -> None:
     print(f"  Inbox pending      : {inbox_st['pending']} batch in attesa\n")
 
 
-def cmd_worker_consume(args: argparse.Namespace) -> None:
+# Background entry point: run one ingestion pass (folder sources plus inbox) through
+# the single worker. The lock timeout lets two workers spawned back to back queue up
+# instead of one silently giving up while the other has already listed the inbox.
+def cmd_worker_run(args: argparse.Namespace) -> None:
+    from pipeline.orchestrator import run_kb
+
     env = global_env()
     registry = load_registry(env)
     kb = find_kb(registry, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
-    consume_inbox(kb, specific_job_id=getattr(args, "job", None), env=env)
+    report = run_kb(kb, merged_runtime_env(kb, env), kb_root=KB_ROOT, lock_timeout=300.0)
+    print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
+    if report["status"] != "ok":
+        sys.exit(f"Ingestion not run for '{args.name}': {report['status']}")
 
 
 def cmd_move(args: argparse.Namespace) -> None:
@@ -1530,7 +1535,6 @@ def build_parser() -> argparse.ArgumentParser:
     inbox_send.set_defaults(func=cmd_inbox_send)
     inbox_consume = inbox_sub.add_parser("consume", help="process pending inbox batches in background")
     inbox_consume.add_argument("name")
-    inbox_consume.add_argument("--job")
     inbox_consume.set_defaults(func=cmd_inbox_consume)
     inbox_status = inbox_sub.add_parser("status", help="show inbox queue status")
     inbox_status.add_argument("name")
@@ -1572,10 +1576,9 @@ def build_parser() -> argparse.ArgumentParser:
     link_status.add_argument("name")
     link_status.set_defaults(func=cmd_link_status)
 
-    worker = sub.add_parser("_worker_consume", help=argparse.SUPPRESS)
+    worker = sub.add_parser("_worker_run", help=argparse.SUPPRESS)
     worker.add_argument("name")
-    worker.add_argument("--job")
-    worker.set_defaults(func=cmd_worker_consume)
+    worker.set_defaults(func=cmd_worker_run)
 
     exclude_help = (
         "Pattern glob stile fnmatch.\n"

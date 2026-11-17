@@ -10,7 +10,10 @@ from pathlib import Path
 
 from storage.json_store import JsonStore
 
-DEFAULT_KB_ROOT = Path(__file__).resolve().parent.parent / "kb"
+# Repository root is three levels up: src/storage/catalog.py -> storage -> src -> repo.
+# The CLI already uses <repo>/kb, so the MCP router must resolve the same directory
+# or the two entry points would read different catalogs for the same KB.
+DEFAULT_KB_ROOT = Path(__file__).resolve().parent.parent.parent / "kb"
 # Sources can either mirror a whole folder or a client-selected subset of files.
 VALID_SOURCE_MODES = {"full_folder", "selected_files"}
 # Every stage a job can be in; used to gate transitions and to detect active jobs.
