@@ -67,3 +67,15 @@ def test_removed_commands_are_gone():
     for command in (["sync", "prepare"], ["link", "status", "kb"]):
         with pytest.raises(SystemExit):
             parser.parse_args(command)
+
+
+# `ragcli` without arguments shows the status summary instead of an argparse error.
+def test_no_arguments_shows_status(monkeypatch, capsys):
+    import sys
+    import ragcli
+    monkeypatch.setattr(sys, "argv", ["ragcli"])
+    monkeypatch.setattr(ragcli.services, "service_status", lambda unit: {"details": "inactive"})
+    monkeypatch.setattr(ragcli, "load_registry", lambda env: {"kbs": []})
+    monkeypatch.setattr(ragcli, "global_env", lambda: {})
+    ragcli.main()
+    assert "MCP service: inactive" in capsys.readouterr().out

@@ -205,6 +205,21 @@ def cmd_add(args: argparse.Namespace) -> None:
     print(f"\nProssimi passi:\n  ragcli start {args.name}\n  ragcli ingest {args.name}\n  ragcli mcp add {args.name}")
 
 
+# Text summary shown by `ragcli` without arguments: MCP service state, then each KB
+# with its server state and its most recent ingestion job.
+def cmd_status(_: argparse.Namespace) -> None:
+    mcp_state = services.service_status("lightrag-mcp.service")
+    print(f"MCP service: {mcp_state['details']}")
+    cmd_list(_)
+    for kb in load_registry(global_env())["kbs"]:
+        try:
+            jobs = ingest_tools.list_jobs(kb["name"], limit=1)["jobs"]
+        except (ValueError, RuntimeError):
+            jobs = []
+        if jobs:
+            print(f"last job {kb['name']}: {jobs[0]['job_id']} {jobs[0]['stage']}")
+
+
 def cmd_list(_: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     if not registry["kbs"]:
@@ -980,7 +995,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ragcli",
         description="Minimal CLI for managing WebUI-first LightRAG KBs with a shared runtime.",
     )
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub = parser.add_subparsers(dest="cmd")
 
     job = sub.add_parser("job", help="ingestion jobs")
     job_sub = job.add_subparsers(dest="job_cmd", required=True)
@@ -1312,6 +1327,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if args.cmd is None:
+        args.func = cmd_status
     # User errors (unknown KB, bad path, busy lock) are raised as ValueError by tools.*
     # and shown as one line: a traceback would hide the message from the user.
     try:
