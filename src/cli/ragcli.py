@@ -25,7 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised via monkeypatch in t
     requests = None
 
 import mcp_clients
-from tools.kb import canonicalize_exclude_specs, ensure_kb_dirs, expand_exclude_specs, find_kb, load_registry, merged_runtime_env, normalize_exclude_specs_for_kb, next_port, split_exclude_specs, save_registry, storage_mode, write_kb_env
+from tools.kb import add_kb, canonicalize_exclude_specs, ensure_kb_dirs, expand_exclude_specs, find_kb, load_registry, merged_runtime_env, normalize_exclude_specs_for_kb, split_exclude_specs, save_registry, storage_mode, write_kb_env
 from tools.system import INGEST_SCRIPT, MCP_SCRIPT, KB_ROOT, global_env, upsert_global_env
 from archive_importer import import_archive_to_kb
 from agent_hooks import (
@@ -437,27 +437,12 @@ def _safe_kb_delete_target(kb: dict) -> Path:
 
 
 def cmd_add(args: argparse.Namespace) -> None:
-    env = global_env()
-    registry = load_registry(env)
-    if find_kb(registry, args.name):
-        sys.exit(f"KB '{args.name}' already exists.")
-    source_dir = Path(args.source_dir).expanduser().resolve()
-    if not source_dir.is_dir():
-        sys.exit(f"Source directory does not exist: {source_dir}")
-    data_dir = source_dir / ".lightrag"
-    kb = {
-        "name": args.name,
-        "source_dir": str(source_dir),
-        "data_dir": str(data_dir),
-        "derived_dir": str(data_dir / "derived"),
-        "rag_storage": str(data_dir / "rag_storage"),
-        "port": args.port or next_port(registry, env),
-        "exclude": [],
-    }
-    ensure_kb_dirs(kb)
-    write_kb_env(kb, env)
-    registry["kbs"].append(kb)
-    save_registry(registry)
+    # Thin adapter: creation, validation and the default data location (kb/<name>/
+    # inside knowledge-os) live in tools.kb.add_kb.
+    try:
+        kb = add_kb(args.name, args.source_dir, port=args.port)
+    except ValueError as exc:
+        sys.exit(str(exc))
     print(f"KB '{args.name}' created.")
     print(f"  source     : {kb['source_dir']}")
     print(f"  data dir   : {kb['data_dir']}")
