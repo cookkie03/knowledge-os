@@ -16,7 +16,7 @@ Spec: `docs/centralize-tools/spec.md`. Ogni ticket è autonomo. Dipendenze tra p
 
 ## Fase C — dopo B
 
-- **T7 · `tools/` unico** (T5). Un solo registro KB e una sola memoria. Include `tools/kb.set_data_location` (default dati in `kb/<kb-id>/` dentro knowledge-os; switch verso/da una cartella sorgente scelta con l'argomento `source`; dry-run, lock di scrittura, copia verificata prima di sostituire) e il default dei nuovi dati in `kb/<kb-id>/` al posto di `<sorgente>/.lightrag`.
+- **T7 · `tools/` unico** (T5). Un solo registro KB e una sola memoria. Include `tools/kb.set_data_location` (default dati in `kb/<kb-id>/.lightrag/` dentro knowledge-os; switch verso/da una cartella sorgente scelta con l'argomento `source`; dry-run, lock di scrittura, copia verificata prima di sostituire) e il default dei nuovi dati in `kb/<kb-id>/.lightrag/` al posto di `<sorgente>/.lightrag`.
 - **T8 · Adapter CLI e MCP** (T7). Albero comandi (incluso `kb data-location`), un solo server MCP, `mcp auth`, test architetturale degli import.
 - **T9 · Rimozioni** (T8). URL importer, sync server/protocollo, link.
 - **T10 · Migrazione dati con dry-run** (T9). Poi test end-to-end sulla KB trading e sull'inbox con gli ZIP dell'utente.

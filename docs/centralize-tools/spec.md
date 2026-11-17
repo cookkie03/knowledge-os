@@ -99,7 +99,7 @@ Per ogni gruppo si sceglie la copia più completa come base, si portano dentro l
 - L'inbox mantiene ricezione, staging, coda e archivio dei processati, e non indicizza più da sola.
 
 ### Posizione dei dati della KB **[≠ GPT: aggiunta]**
-- **Default:** i dati di una KB vivono dentro knowledge-os, in `kb/<kb-id>/` (Catalog, `derived/`, `rag_storage/`, `inbox/`, staging). Nessuna KB nuova scrive dentro le cartelle sorgente.
+- **Default:** i dati di una KB vivono dentro knowledge-os, in `kb/<kb-id>/.lightrag/` (`derived/`, `rag_storage/`, `inbox/`, staging), con il Catalog in `kb/<kb-id>/catalog.json` *fuori* dalla cartella dati: così lo spostamento dei dati non sposta mai il Catalog. Nessuna KB nuova scrive dentro le cartelle sorgente.
 - **Switch:** un tool in `tools/kb` (`set_data_location`) sposta i dati tra `repo` (dentro knowledge-os) e `source` (dentro una cartella sorgente, in `<sorgente>/.lightrag`). Con più sorgenti, la destinazione si sceglie con l'argomento `source` (id o percorso); senza argomento e con più sorgenti il tool rifiuta e chiede quale.
 - Lo spostamento è sicuro: richiede il lock di scrittura della KB e il server fermo, supporta `--dry-run`, copia e verifica prima di sostituire, aggiorna `registry.yaml` solo a copia riuscita e non cancella la vecchia posizione finché la nuova non è verificata.
 - Quando i dati stanno dentro una sorgente, lo scanner li esclude sempre (`internal_excludes` dell'orchestrator).

@@ -8,7 +8,10 @@ runtime .env are managed here.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
+import shutil
+import socket
 from pathlib import Path
 from pathlib import PurePosixPath
 
@@ -60,9 +63,11 @@ def normalize_kb(entry: dict, env: dict[str, str] | None = None) -> dict:
         raise ValueError(f"KB '{entry.get('name', '?')}' missing source_dir/source_folder")
     source_dir = Path(source_raw).expanduser().resolve()
     data_raw = entry.get("data_dir")
-    # Default location of a KB's data: kb/<name>/ inside knowledge-os (never inside
-    # the source folder unless the operator moves it there with set_data_location).
-    data_dir = Path(data_raw).expanduser().resolve() if data_raw else (KB_ROOT / entry["name"]).resolve()
+    # Default location of a KB's data: kb/<name>/.lightrag inside knowledge-os (never
+    # inside the source folder unless the operator moves it there with
+    # set_data_location). The Catalog (kb/<name>/catalog.json) stays one level up,
+    # outside the data directory, so moving the data can never move or lose it.
+    data_dir = Path(data_raw).expanduser().resolve() if data_raw else (KB_ROOT / entry["name"] / ".lightrag").resolve()
     derived_dir = Path(entry.get("derived_dir") or (data_dir / "derived")).expanduser().resolve()
     rag_storage = Path(entry.get("rag_storage") or (data_dir / "rag_storage")).expanduser().resolve()
     return create_kb_entry(
@@ -420,7 +425,7 @@ def add_kb(name: str, source_dir: str, port: int | None = None, env: dict[str, s
     source = Path(source_dir).expanduser().resolve()
     if not source.is_dir():
         raise ValueError(f"Source directory does not exist: {source}")
-    data_dir = (KB_ROOT / name).resolve()
+    data_dir = (KB_ROOT / name / ".lightrag").resolve()
     kb = create_kb_entry(
         name=name,
         source_dir=str(source),
@@ -435,3 +440,188 @@ def add_kb(name: str, source_dir: str, port: int | None = None, env: dict[str, s
     registry["kbs"].append(kb)
     save_registry(registry)
     return kb
+
+
+# Return True when something accepts TCP connections on the KB's local port.
+# Used to refuse a data move while the LightRAG server may have files open.
+def _server_is_listening(port: int) -> bool:
+    try:
+        connection = socket.create_connection(("127.0.0.1", int(port)), timeout=0.5)
+    except OSError:
+        return False
+    connection.close()
+    return True
+
+
+# Compute the sha256 of a file in 1 MiB chunks (never loads a whole file in memory).
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+# Describe a directory tree as {relative path: signature}: regular files by
+# (size, sha256) and symlinks by their target, so two trees compare equal only
+# when every byte and link survived the copy.
+def _tree_signature(root: Path) -> dict:
+    signature = {}
+    for current, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in dirnames + filenames:
+            full = Path(current) / name
+            rel = full.relative_to(root).as_posix()
+            if full.is_symlink():
+                signature[rel] = ("link", os.readlink(full))
+            elif full.is_file():
+                signature[rel] = ("file", full.stat().st_size, _file_sha256(full))
+            else:
+                signature[rel] = ("dir",)
+    return signature
+
+
+# Verify that dest is an exact copy of src, or raise ValueError.
+# Invariant: the old data directory is deleted only after this check passed, so
+# a short or corrupted copy can never replace the only good copy. Module-level
+# so tests can force a failure.
+def _verify_copy(src: Path, dest: Path) -> None:
+    source_signature = _tree_signature(Path(src))
+    dest_signature = _tree_signature(Path(dest))
+    if source_signature != dest_signature:
+        missing = sorted(set(source_signature) - set(dest_signature))
+        changed = []
+        for rel in sorted(set(source_signature) & set(dest_signature)):
+            if source_signature[rel] != dest_signature[rel]:
+                changed.append(rel)
+        raise ValueError(f"copy verification failed (missing: {missing[:5]}, different: {changed[:5]})")
+
+
+# Choose the source folder that will host the data (<source>/.lightrag).
+# With several sources the caller must say which one; guessing could put a
+# multi-gigabyte index inside the wrong project.
+def _choose_source(kb: dict, source: str | None) -> Path:
+    candidates = []
+    for raw in [kb["source_dir"]] + list(kb.get("sources", [])):
+        resolved = Path(raw).expanduser().resolve()
+        if resolved not in candidates:
+            candidates.append(resolved)
+    listing = ", ".join(str(item) for item in candidates)
+    if source is not None:
+        wanted = Path(source).expanduser().resolve()
+        if wanted not in candidates:
+            raise ValueError(f"'{source}' is not a source of KB '{kb['name']}'. Candidates: {listing}")
+        return wanted
+    if len(candidates) == 1:
+        return candidates[0]
+    raise ValueError(f"KB '{kb['name']}' has several sources; pass `source` to choose one. Candidates: {listing}")
+
+
+# Refuse a move whose preconditions are not met; every check raises ValueError.
+def _check_move_allowed(kb: dict, current: Path, destination: Path) -> None:
+    if destination.exists() and any(destination.iterdir()):
+        raise ValueError(f"Destination is not empty: {destination}")
+    if is_relative_to(destination, current) or is_relative_to(current, destination):
+        raise ValueError("Destination and current data directory must not contain each other.")
+    if _server_is_listening(kb["port"]):
+        raise ValueError(f"The server of '{kb['name']}' is running on port {kb['port']}: stop it first.")
+    checkpoints = Path(kb["derived_dir"]) / ".checkpoints"
+    if checkpoints.is_dir() and list(checkpoints.glob("chk_*.json")):
+        raise ValueError("Pending crash-recovery checkpoints exist: run an ingestion pass first.")
+    processing = current / "inbox" / "processing"
+    if processing.is_dir() and any(processing.iterdir()):
+        raise ValueError("The inbox has batches in processing: wait for the worker or run an ingestion pass.")
+
+
+# Move a KB's data directory between knowledge-os ("repo": kb/<name>/.lightrag) and
+# a source folder ("source": <source>/.lightrag). The Catalog is not part of the
+# data directory and never moves.
+# Safety order: preconditions -> writer lock -> copy -> byte-level verification ->
+# atomic rename into place -> Catalog path rebase -> registry save -> only then
+# delete the old tree. Any failure before the registry is saved leaves the old
+# data and registry untouched and removes the new copy. dry_run runs only the
+# checks. Returns a dict describing the move.
+def set_data_location(name: str, location: str, source: str | None = None, dry_run: bool = False,
+                      env: dict[str, str] | None = None, kb_root: str | Path | None = None) -> dict:
+    from pipeline.indexer import KBLockedError, KBWriterLock
+    from storage.catalog import Catalog
+
+    if location not in ("repo", "source"):
+        raise ValueError(f"location must be 'repo' or 'source', not {location!r}")
+    env = env or global_env()
+    registry = load_registry(env)
+    kb = find_kb(registry, name)
+    if kb is None:
+        raise ValueError(f"KB '{name}' not found.")
+
+    root = Path(kb_root) if kb_root else KB_ROOT
+    current = Path(kb["data_dir"]).resolve()
+    if location == "repo":
+        destination = (root / name / ".lightrag").resolve()
+    else:
+        destination = (_choose_source(kb, source) / ".lightrag").resolve()
+    result = {"kb": name, "location": location, "from": str(current), "to": str(destination),
+              "dry_run": bool(dry_run), "moved": False, "catalog_paths_updated": 0, "warnings": []}
+    if current == destination:
+        return result
+    _check_move_allowed(kb, current, destination)
+    if dry_run:
+        return result
+
+    old_derived = Path(kb["derived_dir"]).resolve()
+    new_derived = destination / "derived"
+    staging = destination.parent / (destination.name + ".moving")
+    if staging.exists():
+        raise ValueError(f"A stale partial copy exists, remove it first: {staging}")
+
+    # Hold the KB writer lock for the whole move so no ingestion pass can write
+    # while the tree is being copied.
+    lock = KBWriterLock(old_derived / ".kb_writer.lock", kb_id=name)
+    try:
+        lock.acquire(timeout=0.0)
+    except KBLockedError:
+        raise ValueError(f"Another writer is active on '{name}'.")
+    rebased = 0
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if current.exists():
+            shutil.copytree(current, staging, symlinks=True)
+            try:
+                _verify_copy(current, staging)
+            except ValueError:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+        else:
+            staging.mkdir(parents=True)
+        if destination.exists():
+            os.rmdir(destination)
+        os.replace(staging, destination)
+        try:
+            with Catalog.open_for_kb(name, root) as catalog:
+                rebased = catalog.rebase_artifact_paths(old_derived, new_derived)
+            kb["data_dir"] = str(destination)
+            kb["derived_dir"] = str(new_derived)
+            kb["rag_storage"] = str(destination / "rag_storage")
+            ensure_kb_dirs(kb)
+            write_kb_env(kb, env)
+            save_registry(registry)
+        except BaseException:
+            # Roll back: the registry still points at the intact old tree.
+            if rebased:
+                with Catalog.open_for_kb(name, root) as catalog:
+                    catalog.rebase_artifact_paths(new_derived, old_derived)
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+    finally:
+        lock.release()
+
+    result["moved"] = True
+    result["catalog_paths_updated"] = rebased
+    # The registry is saved, so the old tree is no longer referenced.
+    try:
+        shutil.rmtree(current)
+    except OSError as exc:
+        result["warnings"].append(f"old data directory could not be removed: {exc}")
+    return result

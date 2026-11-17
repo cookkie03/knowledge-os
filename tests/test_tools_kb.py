@@ -24,10 +24,10 @@ def test_add_kb_defaults_data_into_knowledge_os(sandbox):
     source = sandbox["tmp"] / "notes"
     source.mkdir()
     kb = kb_tools.add_kb("notes", str(source), env=sandbox["env"])
-    assert kb["data_dir"] == str((sandbox["kb_root"] / "notes").resolve())
-    assert kb["derived_dir"].endswith("notes/derived")
+    assert kb["data_dir"] == str((sandbox["kb_root"] / "notes" / ".lightrag").resolve())
+    assert kb["derived_dir"].endswith("notes/.lightrag/derived")
     assert kb["port"] == 9700
-    assert (sandbox["kb_root"] / "notes" / "derived" / "text").is_dir()
+    assert (sandbox["kb_root"] / "notes" / ".lightrag" / "derived" / "text").is_dir()
     assert kb_tools.find_kb(kb_tools.load_registry(sandbox["env"]), "notes")["source_dir"] == str(source.resolve())
     assert storage_mode_is(kb, "repo")
 
@@ -59,7 +59,7 @@ def test_second_kb_gets_the_next_free_port(sandbox):
 def test_registry_entry_without_data_dir_defaults_to_knowledge_os(sandbox):
     sandbox["registry"].write_text("kbs:\n- name: legacy\n  source_dir: %s\n" % sandbox["tmp"])
     kb = kb_tools.find_kb(kb_tools.load_registry(sandbox["env"]), "legacy")
-    assert kb["data_dir"] == str((sandbox["kb_root"] / "legacy").resolve())
+    assert kb["data_dir"] == str((sandbox["kb_root"] / "legacy" / ".lightrag").resolve())
 
 
 def test_save_registry_is_atomic_and_leaves_no_temporary_files(sandbox):
