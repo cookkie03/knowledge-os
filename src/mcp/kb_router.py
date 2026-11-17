@@ -42,7 +42,9 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "src" / "cli") not in sys.path:
     sys.path.insert(0, str(ROOT / "src" / "cli"))
 
-from kb_registry import find_kb, global_env, load_registry, storage_mode  # noqa: E402
+from tools.kb import find_kb, load_registry, storage_mode  # noqa: E402
+
+from tools.system import global_env  # noqa: E402
 from mcp.memories import (  # noqa: E402
     deprecate_memory_by_id,
     query_memories,

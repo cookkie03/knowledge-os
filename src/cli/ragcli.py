@@ -25,25 +25,8 @@ except ModuleNotFoundError:  # pragma: no cover - exercised via monkeypatch in t
     requests = None
 
 import mcp_clients
-from kb_registry import (
-    INGEST_SCRIPT,
-    MCP_SCRIPT,
-    KB_ROOT,
-    canonicalize_exclude_specs,
-    ensure_kb_dirs,
-    expand_exclude_specs,
-    find_kb,
-    global_env,
-    load_registry,
-    merged_runtime_env,
-    normalize_exclude_specs_for_kb,
-    next_port,
-    split_exclude_specs,
-    save_registry,
-    storage_mode,
-    upsert_global_env,
-    write_kb_env,
-)
+from tools.kb import canonicalize_exclude_specs, ensure_kb_dirs, expand_exclude_specs, find_kb, load_registry, merged_runtime_env, normalize_exclude_specs_for_kb, next_port, split_exclude_specs, save_registry, storage_mode, write_kb_env
+from tools.system import INGEST_SCRIPT, MCP_SCRIPT, KB_ROOT, global_env, upsert_global_env
 from archive_importer import import_archive_to_kb
 from agent_hooks import (
     capture_post_session,

@@ -21,7 +21,9 @@ try:
 except ImportError:
     yt_dlp = None
 
-from kb_registry import find_kb, global_env, load_registry
+from tools.kb import find_kb, load_registry
+
+from tools.system import global_env
 from pipeline.parsers import parse_audio_document
 
 

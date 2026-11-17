@@ -1,7 +1,7 @@
 import argparse
 import pytest
 from ragcli import cmd_config_show, cmd_config_set, build_parser
-from kb_registry import global_env, upsert_global_env
+from tools.system import global_env, upsert_global_env
 
 
 def test_config_show_runs_cleanly(capsys):
@@ -18,9 +18,8 @@ def test_config_set_toggles_pipeline_and_models(tmp_path, monkeypatch, capsys):
     test_env = tmp_path / "global.env"
     test_env.write_text("LLM_MODEL=test-llm\nEMBEDDING_MODEL=test-emb\nDOCLING_ASR_ENGINE=whisper_turbo_native\n")
 
-    import kb_registry
-    monkeypatch.setattr(kb_registry, "CONFIG", test_env)
-    monkeypatch.setattr("kb_registry.CONFIG", test_env)
+    import tools.system as system
+    monkeypatch.setattr(system, "CONFIG", test_env)
 
     parser = build_parser()
     args = parser.parse_args([

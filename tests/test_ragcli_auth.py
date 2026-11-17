@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import kb_registry
+import tools.system as kb_registry
 from ragcli import cmd_auth_clear, cmd_auth_generate, cmd_auth_set, cmd_auth_show
 
 

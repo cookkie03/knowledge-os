@@ -130,8 +130,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path("src").resolve()))
-sys.path.insert(0, str(Path("src/cli").resolve()))
-from kb_registry import find_kb, load_registry  # noqa: E402
+from tools.kb import find_kb, load_registry  # noqa: E402
 
 name = sys.argv[1]
 sys.exit(0 if find_kb(load_registry(), name) else 1)
@@ -145,8 +144,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path("src").resolve()))
-sys.path.insert(0, str(Path("src/cli").resolve()))
-from kb_registry import find_kb, global_env, load_registry, write_kb_env  # noqa: E402
+from tools.kb import find_kb, load_registry, write_kb_env  # noqa: E402
+from tools.system import global_env  # noqa: E402
 
 name = sys.argv[1]
 env = global_env()

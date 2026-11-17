@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kb_registry import global_env
+from tools.system import global_env
 
 
 def test_global_env_exposes_linux_docling_defaults(tmp_path: Path, monkeypatch) -> None:
@@ -17,7 +17,7 @@ def test_global_env_exposes_linux_docling_defaults(tmp_path: Path, monkeypatch) 
         )
         + "\n"
     )
-    monkeypatch.setattr("kb_registry.CONFIG", config_file)
+    monkeypatch.setattr("tools.system.CONFIG", config_file)
 
     env = global_env()
 
@@ -41,7 +41,7 @@ def test_global_env_normalizes_linux_platform_before_defaults(tmp_path: Path, mo
         )
         + "\n"
     )
-    monkeypatch.setattr("kb_registry.CONFIG", config_file)
+    monkeypatch.setattr("tools.system.CONFIG", config_file)
 
     env = global_env()
 

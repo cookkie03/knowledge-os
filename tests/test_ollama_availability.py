@@ -1,6 +1,6 @@
 import requests
 import pytest
-from kb_registry import global_env
+from tools.system import global_env
 
 def test_ollama_server_reachable():
     env = global_env()

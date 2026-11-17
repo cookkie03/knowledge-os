@@ -22,7 +22,7 @@ if str(ROOT / "src") not in sys.path:
 if str(ROOT / "src" / "cli") not in sys.path:
     sys.path.insert(0, str(ROOT / "src" / "cli"))
 
-from kb_registry import find_kb, load_registry  # noqa: E402
+from tools.kb import find_kb, load_registry  # noqa: E402
 from pipeline.dreaming import query_memories, remember_memory  # noqa: E402
 
 
