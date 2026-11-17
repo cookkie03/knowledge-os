@@ -2,7 +2,9 @@
 
 Extracts archives with Zip-Slip protection, bounded size/ratio enforcement,
 and normalizes message trees into clean Markdown documents with frontmatter.
-Also extracts stable user preferences and instructions.
+Also extracts stable user preferences and instructions. The JSON structure
+detection and Markdown rendering live in pipeline.json_parser (single
+implementation shared with the ingestion dispatcher).
 """
 
 from __future__ import annotations
@@ -13,10 +15,11 @@ import re
 import shutil
 import tempfile
 import zipfile
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+from pipeline.json_parser import conversation_to_markdown, detect_and_parse_json
 
 MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024  # 200 MB per file limit
 MAX_TOTAL_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB total extracted limit
@@ -126,330 +129,11 @@ def safe_extract_zip(zip_path: Path | str, target_dir: Path | str) -> list[Path]
     return extracted_files
 
 
-@dataclass
-class NormalizedMessage:
-    role: str
-    content: str
-    timestamp: str | None = None
-    model: str | None = None
-
-
-@dataclass
-class NormalizedConversation:
-    id: str
-    title: str
-    created_at: str
-    updated_at: str
-    messages: list[NormalizedMessage] = field(default_factory=list)
-    source: str = "archive"
-
-
 # Sanitize title to create a safe filesystem filename.
 def slugify(text: str) -> str:
     cleaned = re.sub(r"[^\w\s-]", "", text.strip().lower())
     slug = re.sub(r"[\s_-]+", "-", cleaned)[:60].strip("-")
     return slug or "conversation"
-
-
-# Convert normalized conversation into a Markdown document with YAML frontmatter.
-def conversation_to_markdown(conv: NormalizedConversation) -> str:
-    frontmatter = [
-        "---",
-        f"id: {json.dumps(conv.id)}",
-        f"title: {json.dumps(conv.title)}",
-        f"source: {json.dumps(conv.source)}",
-        f"created_at: {json.dumps(conv.created_at)}",
-        f"updated_at: {json.dumps(conv.updated_at)}",
-        "type: episodic",
-        "status: active",
-        "---",
-        f"# {conv.title or 'Conversazione'}",
-        "",
-    ]
-    lines = list(frontmatter)
-
-    for msg in conv.messages:
-        role_label = msg.role.capitalize()
-        header = f"### {role_label}"
-        meta = []
-        if msg.timestamp:
-            meta.append(msg.timestamp)
-        if msg.model:
-            meta.append(f"Model: {msg.model}")
-        if meta:
-            header += f" ({', '.join(meta)})"
-        lines.append(header)
-        lines.append("")
-        lines.append(msg.content.strip())
-        lines.append("")
-
-    return "\n".join(lines).strip() + "\n"
-
-
-# Parse ChatGPT conversations.json message tree and extract active linear thread.
-def parse_chatgpt_conversations(json_data: list[dict[str, Any]]) -> list[NormalizedConversation]:
-    conversations: list[NormalizedConversation] = []
-
-    for item in json_data:
-        cid = item.get("id") or item.get("conversation_id") or "unknown"
-        title = item.get("title") or "Chat senza titolo"
-        c_time = item.get("create_time")
-        u_time = item.get("update_time")
-        created_at = datetime.fromtimestamp(c_time, tz=timezone.utc).isoformat() if c_time else ""
-        updated_at = datetime.fromtimestamp(u_time, tz=timezone.utc).isoformat() if u_time else created_at
-
-        # ChatGPT message tree: mapping with current_node tracing backwards to root.
-        mapping = item.get("mapping", {})
-        current_node_id = item.get("current_node")
-
-        active_nodes: list[dict[str, Any]] = []
-        curr = current_node_id
-        while curr and curr in mapping:
-            node = mapping[curr]
-            active_nodes.append(node)
-            curr = node.get("parent")
-        active_nodes.reverse()
-
-        messages: list[NormalizedMessage] = []
-        for node in active_nodes:
-            msg = node.get("message")
-            if not msg:
-                continue
-            author = msg.get("author", {})
-            role = author.get("role", "unknown")
-            if role in {"system"}:
-                continue
-            content_data = msg.get("content", {})
-            parts = content_data.get("parts", [])
-            text_parts = []
-            for p in parts:
-                if isinstance(p, str):
-                    text_parts.append(p)
-                elif isinstance(p, dict) and "text" in p:
-                    text_parts.append(p["text"])
-            content_str = "\n".join(text_parts).strip()
-            if not content_str:
-                continue
-
-            m_time = msg.get("create_time")
-            ts = datetime.fromtimestamp(m_time, tz=timezone.utc).isoformat() if m_time else None
-            metadata = msg.get("metadata", {})
-            model_slug = metadata.get("model_slug")
-
-            messages.append(NormalizedMessage(
-                role=role,
-                content=content_str,
-                timestamp=ts,
-                model=model_slug,
-            ))
-
-        if messages:
-            conversations.append(NormalizedConversation(
-                id=cid,
-                title=title,
-                created_at=created_at,
-                updated_at=updated_at,
-                messages=messages,
-                source="chatgpt",
-            ))
-
-    return conversations
-
-
-# Parse Claude export conversations.json list into NormalizedConversation items.
-def parse_claude_conversations(json_data: list[dict[str, Any]]) -> list[NormalizedConversation]:
-    conversations: list[NormalizedConversation] = []
-
-    for item in json_data:
-        cid = item.get("uuid") or item.get("id") or "unknown"
-        title = item.get("name") or item.get("title") or "Chat Claude"
-        created_at = item.get("created_at") or ""
-        updated_at = item.get("updated_at") or created_at
-
-        chat_messages = item.get("chat_messages", [])
-        messages: list[NormalizedMessage] = []
-
-        for msg in chat_messages:
-            sender = msg.get("sender") or ("human" if msg.get("role") == "user" else "assistant")
-            role = "user" if sender == "human" else "assistant"
-            content = msg.get("text", "")
-            if not content and "content" in msg:
-                c_field = msg["content"]
-                if isinstance(c_field, list):
-                    content = "\n".join(b.get("text", "") for b in c_field if isinstance(b, dict)).strip()
-                elif isinstance(c_field, str):
-                    content = c_field
-
-            if not content.strip():
-                continue
-
-            ts = msg.get("created_at")
-            messages.append(NormalizedMessage(
-                role=role,
-                content=content.strip(),
-                timestamp=ts,
-                model=None,
-            ))
-
-        if messages:
-            conversations.append(NormalizedConversation(
-                id=cid,
-                title=title,
-                created_at=created_at,
-                updated_at=updated_at,
-                messages=messages,
-                source="claude",
-            ))
-
-    return conversations
-
-
-# Convert arbitrary JSON object or list of records into clean, readable Markdown structure.
-def _json_to_markdown_lines(obj: Any, depth: int = 1) -> list[str]:
-    lines: list[str] = []
-    indent = "  " * (depth - 1)
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(v, (dict, list)):
-                lines.append(f"{indent}- **{k}**:")
-                lines.extend(_json_to_markdown_lines(v, depth + 1))
-            else:
-                lines.append(f"{indent}- **{k}**: {v}")
-    elif isinstance(obj, list):
-        for idx, item in enumerate(obj):
-            if isinstance(item, (dict, list)):
-                lines.append(f"{indent}- Item {idx + 1}:")
-                lines.extend(_json_to_markdown_lines(item, depth + 1))
-            else:
-                lines.append(f"{indent}- {item}")
-    else:
-        lines.append(f"{indent}{obj}")
-    return lines
-
-
-# Parse Notion API block-based or database export JSON into NormalizedConversation.
-def parse_notion_export(data: dict[str, Any] | list[Any]) -> list[NormalizedConversation]:
-    blocks: list[dict[str, Any]] = []
-    title = "Notion Export"
-    if isinstance(data, dict):
-        if "results" in data and isinstance(data["results"], list):
-            blocks = [b for b in data["results"] if isinstance(b, dict)]
-        if "title" in data:
-            title = str(data["title"])
-    elif isinstance(data, list):
-        blocks = [b for b in data if isinstance(b, dict)]
-
-    doc_lines: list[str] = []
-    for block in blocks:
-        btype = block.get("type", "")
-        content_dict = block.get(btype, {})
-        text = ""
-        if isinstance(content_dict, dict) and "rich_text" in content_dict:
-            text = "".join(t.get("plain_text", "") for t in content_dict["rich_text"] if isinstance(t, dict))
-        elif isinstance(content_dict, dict) and "title" in content_dict:
-            text = "".join(t.get("plain_text", "") for t in content_dict["title"] if isinstance(t, dict))
-
-        if not text and "plain_text" in block:
-            text = str(block["plain_text"])
-
-        if btype.startswith("heading_1"):
-            doc_lines.append(f"# {text}")
-        elif btype.startswith("heading_2"):
-            doc_lines.append(f"## {text}")
-        elif btype.startswith("heading_3"):
-            doc_lines.append(f"### {text}")
-        elif btype == "bulleted_list_item":
-            doc_lines.append(f"- {text}")
-        elif btype == "numbered_list_item":
-            doc_lines.append(f"1. {text}")
-        elif btype == "quote":
-            doc_lines.append(f"> {text}")
-        elif text:
-            doc_lines.append(text)
-
-    body = "\n\n".join(doc_lines).strip()
-    if not body:
-        return []
-
-    return [
-        NormalizedConversation(
-            id=f"notion_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-            title=title,
-            created_at=datetime.now(timezone.utc).isoformat(),
-            updated_at=datetime.now(timezone.utc).isoformat(),
-            messages=[NormalizedMessage(role="document", content=body)],
-            source="notion",
-        )
-    ]
-
-
-# Parse generic JSON data into a clean structured document.
-def parse_generic_json(raw_data: Any, title: str = "Generic JSON Export") -> list[NormalizedConversation]:
-    lines = _json_to_markdown_lines(raw_data)
-    body = "\n".join(lines).strip()
-    if not body:
-        return []
-
-    return [
-        NormalizedConversation(
-            id=f"json_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-            title=title,
-            created_at=datetime.now(timezone.utc).isoformat(),
-            updated_at=datetime.now(timezone.utc).isoformat(),
-            messages=[NormalizedMessage(role="document", content=body)],
-            source="generic_json",
-        )
-    ]
-
-
-# Detect whether json structure matches ChatGPT, Claude, Notion, Claude Code or generic export.
-def detect_and_parse_json(content: str) -> list[NormalizedConversation]:
-    try:
-        raw = json.loads(content)
-    except Exception:
-        return []
-
-    # Check Notion export format
-    if isinstance(raw, dict) and ("results" in raw or raw.get("object") in {"list", "page", "block"}):
-        notion_res = parse_notion_export(raw)
-        if notion_res:
-            return notion_res
-
-    data = raw
-    if isinstance(data, dict):
-        if "conversations" in data and isinstance(data["conversations"], list):
-            data = data["conversations"]
-        elif "turns" in data and isinstance(data["turns"], list):
-            # Claude Code / Agent transcript
-            data = data["turns"]
-        else:
-            data = [data]
-
-    if not data or not isinstance(data, list):
-        return parse_generic_json(raw)
-
-    first = data[0]
-    if not isinstance(first, dict):
-        return parse_generic_json(raw)
-
-    # Distinguish ChatGPT (mapping tree) vs Claude (chat_messages list)
-    if "mapping" in first or "current_node" in first:
-        return parse_chatgpt_conversations(data)
-    elif "chat_messages" in first or "uuid" in first:
-        return parse_claude_conversations(data)
-    elif "messages" in first and isinstance(first["messages"], list):
-        # Generic conversation format (Claude Code / OpenAI / Gemini / etc.)
-        return parse_claude_conversations(data)
-
-    # Notion list of blocks
-    if "type" in first and ("rich_text" in first.get(first.get("type", ""), {}) or "object" in first):
-        notion_res = parse_notion_export(data)
-        if notion_res:
-            return notion_res
-
-    # Fallback to robust generic JSON parser
-    return parse_generic_json(raw)
-
 
 
 # Heuristic patterns identifying stable user instructions, preferences, and environment facts.
@@ -463,15 +147,15 @@ USER_INSTRUCTION_PATTERNS = [
 
 
 # Extract preference candidates from user turns across conversations.
-def extract_user_preferences(conversations: list[NormalizedConversation]) -> list[dict[str, Any]]:
+def extract_user_preferences(conversations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     extracted: list[dict[str, Any]] = []
     seen_hashes: set[str] = set()
 
     for conv in conversations:
-        for msg in conv.messages:
-            if msg.role not in {"user", "human"}:
+        for msg in conv["messages"]:
+            if msg["role"] not in {"user", "human"}:
                 continue
-            text = msg.content
+            text = msg["content"]
             matched_for_message = False
             for pat in USER_INSTRUCTION_PATTERNS:
                 if matched_for_message:
@@ -487,9 +171,9 @@ def extract_user_preferences(conversations: list[NormalizedConversation]) -> lis
                     seen_hashes.add(key)
                     extracted.append({
                         "content": snippet,
-                        "source_conv_id": conv.id,
-                        "source_conv_title": conv.title,
-                        "timestamp": msg.timestamp or conv.created_at,
+                        "source_conv_id": conv["id"],
+                        "source_conv_title": conv["title"],
+                        "timestamp": msg["timestamp"] or conv["created_at"],
                     })
                     matched_for_message = True
                     break
@@ -528,7 +212,7 @@ def import_archive_to_kb(
             raise ValueError(f"Unsupported archive format: {archive_path}")
 
         # Search for conversation JSON files in extracted directory
-        all_convs: list[NormalizedConversation] = []
+        all_convs: list[dict[str, Any]] = []
         for json_candidate in tmp_path.rglob("*.json"):
             try:
                 content = json_candidate.read_text(encoding="utf-8", errors="replace")
@@ -545,8 +229,9 @@ def import_archive_to_kb(
         batch_folder.mkdir(parents=True, exist_ok=True)
 
         for conv in all_convs:
-            md_content = conversation_to_markdown(conv)
-            filename = f"{slugify(conv.title)}_{conv.id[:8]}.md"
+            # Imported chats are stored as episodic memories, hence the extra keys.
+            md_content = conversation_to_markdown(conv, ["type: episodic", "status: active"])
+            filename = f"{slugify(conv['title'])}_{conv['id'][:8]}.md"
             (batch_folder / filename).write_text(md_content, encoding="utf-8")
             written_convs += 1
 

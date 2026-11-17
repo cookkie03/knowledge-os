@@ -23,6 +23,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from pipeline.json_parser import (
+    JSON_PARSER_VERSION,
+    convert_json_text,
+    convert_jsonl_text,
+)
+
 TEXT_EXT: set[str] = {
     ".md", ".markdown", ".txt", ".rst", ".org", ".tex", ".adoc", ".asciidoc",
     ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp", ".h", ".hpp",
@@ -504,6 +510,58 @@ def parse_text_file(
     )
 
 
+# Parse a .json or .jsonl file into structured Markdown (ticket T6).
+# The file is decoded exactly like a plain-text file, then converted by structure
+# (conversation export, Notion, generic JSON, or JSONL record by record).
+# Invalid JSON is not an error: it falls back to the plain-text result with
+# json_valid=False in the metadata, so one malformed config file can never make a
+# whole job fail on every run. The derived hash covers the Markdown and the
+# parser version, so a rendering change regenerates the artifact.
+def parse_json_file(
+    path: Path,
+    binary_sha256: str | None = None,
+    source_uri: str = "",
+) -> dict[str, Any]:
+    p = Path(path)
+    base = parse_text_file(p, binary_sha256=binary_sha256, source_uri=source_uri)
+    if p.suffix.lower() == ".jsonl":
+        converted = convert_jsonl_text(base["text_content"], p.name)
+    else:
+        converted = convert_json_text(base["text_content"], p.name)
+    if converted is None:
+        base["metadata"]["json_valid"] = False
+        base["sidecar"]["metadata"] = dict(base["metadata"])
+        return base
+
+    markdown = converted["markdown"]
+    d_hash = compute_text_sha256(markdown)
+    metadata = dict(base["metadata"])
+    metadata["json_valid"] = True
+    metadata["structure"] = converted["structure"]
+    metadata["records"] = converted["records"]
+    metadata["invalid_lines"] = converted["invalid_lines"]
+    sidecar = dict(base["sidecar"])
+    sidecar["derived_hash"] = d_hash
+    sidecar["metadata"] = metadata
+    sidecar["stats"] = {
+        "char_count": len(markdown),
+        "word_count": len(markdown.split()),
+        "line_count": len(markdown.splitlines()),
+        "page_count": 1,
+    }
+    return create_parsed_document(
+        canonical_doc_id=base["canonical_doc_id"],
+        category="text",
+        text_content=markdown,
+        binary_sha256=base["binary_sha256"],
+        derived_hash=d_hash,
+        parser_name="json_structural",
+        parser_version=JSON_PARSER_VERSION,
+        metadata=metadata,
+        sidecar=sidecar,
+    )
+
+
 def parse_visual_document(
     path: Path,
     env: dict[str, str] | None = None,
@@ -754,6 +812,8 @@ def parse_document(
     p = Path(path)
     cat = get_file_category(p)
 
+    if cat == "text" and p.suffix.lower() in (".json", ".jsonl"):
+        return parse_json_file(p, binary_sha256=binary_sha256, source_uri=source_uri)
     if cat == "text":
         return parse_text_file(p, binary_sha256=binary_sha256, source_uri=source_uri)
     if cat in ("pdf", "images"):

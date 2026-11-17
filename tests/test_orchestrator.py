@@ -383,3 +383,100 @@ def test_run_kb_reports_server_down_and_imports_registry_sources(tmp_path):
     with Catalog.open_for_kb("kb1", kb_root) as catalog:
         types = sorted(source["type"] for source in catalog.list_sources())
     assert types == ["folder", "inbox", "primary"]
+
+
+# ---------------------------------------------------------------- archives and JSON (T6)
+
+def _make_zip(path, files):
+    import zipfile
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+
+
+def test_zip_in_a_folder_source_is_expanded_with_provenance_and_left_untouched(tmp_path):
+    kb, catalog, backend, worker = _setup(tmp_path)
+    _primary(catalog, tmp_path)
+    (tmp_path / "src" / "docs").mkdir()
+    pack = tmp_path / "src" / "docs" / "pack.zip"
+    _make_zip(pack, {"inner/a.md": "alpha", "data.json": '{"k": "v"}'})
+    original = pack.read_bytes()
+
+    first = run_ingest(kb, catalog, worker)
+
+    paths = sorted(f["relative_path"] for f in catalog.list_files(source_id="primary"))
+    assert paths == ["docs/pack.zip!/data.json", "docs/pack.zip!/inner/a.md"]
+    assert first["sources"][0]["job"]["stage"] == "COMPLETED"
+    # Extraction happens only in staging: the source folder is unchanged.
+    assert pack.read_bytes() == original
+    assert sorted(p.name for p in (tmp_path / "src" / "docs").iterdir()) == ["pack.zip"]
+
+    second = run_ingest(kb, catalog, worker)
+    assert second["sources"][0]["status"] == "unchanged"
+    assert len(catalog.list_jobs(kb_id="kb1")) == 1
+
+
+def test_changed_zip_member_is_modified_and_removed_member_is_deleted(tmp_path):
+    kb, catalog, backend, worker = _setup(tmp_path)
+    _primary(catalog, tmp_path)
+    for name in ("a", "b", "c", "d", "e", "f"):
+        (tmp_path / "src" / (name + ".md")).write_text(name)
+    pack = tmp_path / "src" / "pack.zip"
+    _make_zip(pack, {"keep.md": "one", "gone.md": "two"})
+    run_ingest(kb, catalog, worker)
+
+    _make_zip(pack, {"keep.md": "one v2"})
+    result = run_ingest(kb, catalog, worker)
+
+    counters = result["sources"][0]["job"]["counters"]
+    assert counters["modified"] == 1 and counters["deleted"] == 1
+    assert catalog.get_file("primary", "pack.zip!/gone.md")["active"] is False
+    assert catalog.get_file("primary", "pack.zip!/keep.md")["active"] is True
+
+
+def test_json_file_is_ingested_as_structured_markdown(tmp_path):
+    kb, catalog, backend, worker = _setup(tmp_path)
+    _primary(catalog, tmp_path)
+    (tmp_path / "src" / "data.json").write_text('{"project": "kos", "tags": ["a", "b"]}')
+    run_ingest(kb, catalog, worker)
+    derived = (tmp_path / "kbdata" / "derived" / "text" / "data.json.md").read_text()
+    assert "structure: generic_json" in derived
+    assert "- **project**: kos" in derived
+    assert '{"project"' not in derived
+
+
+def test_zip_in_the_inbox_is_expanded_and_archived(tmp_path):
+    kb, catalog, backend, worker = _inbox_setup(tmp_path)
+    pack = tmp_path / "export.zip"
+    _make_zip(pack, {"notes/a.md": "alpha", "conversations.json": '[{"id": "c1", "messages": '
+                     '[{"role": "user", "content": "hi"}]}]'})
+    job = queue_inbox_send(kb, source_path=pack)
+
+    result = run_ingest(kb, catalog, worker)
+
+    batch = result["inbox"][0]
+    assert batch["status"] == "completed"
+    batch_id = job["job_id"]
+    paths = sorted(f["relative_path"] for f in catalog.list_files(source_id="inbox"))
+    assert paths == [f"{batch_id}/export.zip!/conversations.json", f"{batch_id}/export.zip!/notes/a.md"]
+    assert (tmp_path / "kbdata" / "inbox" / "processed" / batch_id / "export.zip").is_file()
+    staging = tmp_path / "kbdata" / "staging"
+    assert not staging.exists() or list(staging.iterdir()) == []
+
+
+def test_zip_slip_entry_in_the_inbox_is_not_ingested_and_batch_is_failed(tmp_path):
+    kb, catalog, backend, worker = _inbox_setup(tmp_path)
+    pack = tmp_path / "evil.zip"
+    _make_zip(pack, {"good.md": "fine", "../evil.md": "escaped"})
+    job = queue_inbox_send(kb, source_path=pack)
+
+    result = run_ingest(kb, catalog, worker)
+
+    assert result["inbox"][0]["status"] == "failed"
+    assert not (tmp_path / "evil.md").exists()
+    assert not (tmp_path / "kbdata" / "evil.md").exists()
+    # The safe entry is ingested; the escaping entry never reaches the catalog.
+    paths = [f["relative_path"] for f in catalog.list_files(source_id="inbox")]
+    assert paths == [f"{job['job_id']}/evil.zip!/good.md"]
+    assert load_inbox_jobs(kb)["jobs"][job["job_id"]]["status"] == "failed"

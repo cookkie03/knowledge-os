@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from pipeline.expansion import expand_archives
 from pipeline.indexer import KBLockedError, LightRAGClient, ProtectedIndexer
 from pipeline.ingestion_worker import (
     IngestionWorker,
@@ -141,9 +142,72 @@ def status_for_job(job):
     return "failed"
 
 
+# Turn a source's physical files into the logical files the Catalog tracks.
+# ZIP archives are expanded in work_dir (never next to the source) into member
+# entries whose path carries provenance ("docs/a.zip!/inner/b.md"); formats the
+# parsers cannot read are skipped; every remaining file is hashed. `prefix` is
+# prepended to every logical path (the inbox uses it for the batch id).
+# Returns {"entries": [{"path","root","rel","size","mtime_ns","sha256"}],
+# "skipped": [paths], "errors": [str], "complete": bool}. An incomplete result
+# (unreadable file, rejected archive entry) must never authorize a deletion.
+def collect_entries(root, rel_paths, work_dir, prefix=""):
+    expansion = expand_archives(root, rel_paths, work_dir)
+    errors = list(expansion["errors"])
+    skipped = []
+    candidates = []
+    for rel in expansion["plain"]:
+        if get_file_category(rel) == "unsupported":
+            skipped.append(prefix + rel)
+        else:
+            candidates.append({"path": prefix + rel, "root": str(root), "rel": rel})
+    for member in expansion["members"]:
+        if get_file_category(member["path"]) == "unsupported":
+            skipped.append(prefix + member["path"])
+        else:
+            candidates.append({"path": prefix + member["path"], "root": member["root"], "rel": member["rel"]})
+
+    # Hash each group against its own root: plain files against the source,
+    # members against their extraction directory.
+    groups = {}
+    for candidate in candidates:
+        groups.setdefault(candidate["root"], []).append(candidate)
+    entries = []
+    hash_errors = []
+    for group_root, group in groups.items():
+        rels = []
+        for candidate in group:
+            rels.append(candidate["rel"])
+        hashed = hash_source_files(group_root, rels)
+        hash_errors.extend(hashed["errors"])
+        info_by_rel = {}
+        for item in hashed["files"]:
+            info_by_rel[item["path"]] = item
+        for candidate in group:
+            info = info_by_rel.get(candidate["rel"])
+            if info is None:
+                continue
+            entry = dict(candidate)
+            entry["size"] = info["size"]
+            entry["mtime_ns"] = info["mtime_ns"]
+            entry["sha256"] = info["sha256"]
+            entries.append(entry)
+    errors.extend(hash_errors)
+    entries.sort(key=_entry_path)
+    return {"entries": entries, "skipped": skipped, "errors": errors,
+            "complete": expansion["complete"] and not hash_errors}
+
+
+# Sort key for entries (kept as a named function instead of a lambda).
+def _entry_path(entry):
+    return entry["path"]
+
+
 # Scan one folder source, plan the delta against the Catalog and run it as a job.
 # Safety: an unreachable or partially scanned source never plans deletions, and
-# the worker's own guards (thresholds, empty-root detection) still apply.
+# the worker's own guards (thresholds, empty-root detection) still apply. ZIP
+# archives are re-extracted into scratch space on every pass because the Catalog
+# tracks their members, not the archive itself; the scratch space and the job's
+# staging area are always removed afterwards.
 def run_folder_source(kb, catalog, worker, source):
     report = {"source": source["id"], "type": source["type"], "status": "unchanged",
               "job": None, "skipped_unsupported": 0, "errors": []}
@@ -153,120 +217,121 @@ def run_folder_source(kb, catalog, worker, source):
         report["errors"].append("source folder unavailable: {}".format(root))
         return report
 
-    patterns = scanner_patterns(source.get("exclude_patterns")) + internal_excludes(root, kb)
-    listing = list_source_files(root, patterns)
-    errors = list(listing["errors"])
-
-    supported = []
-    for rel in listing["files"]:
-        if get_file_category(rel) == "unsupported":
-            report["skipped_unsupported"] += 1
-        else:
-            supported.append(rel)
-    hashed = hash_source_files(root, supported)
-    errors.extend(hashed["errors"])
-    complete = listing["complete"] and not hashed["errors"]
-
-    previous = []
-    for record in catalog.list_files(source_id=source["id"], active_only=True):
-        previous.append({"path": record["relative_path"], "sha256": record["binary_sha256"]})
-    plan = diff_snapshots(previous, hashed["files"], complete)
-    report["errors"] = errors
-    if not (plan["add"] or plan["modify"] or plan["rename"] or plan["delete"]):
-        return report
-
-    by_path = {}
-    for item in hashed["files"]:
-        by_path[item["path"]] = item
-    job_id = new_job_id("scan")
-    catalog.create_job(job_id, kb["name"], source_id=source["id"], scan_id=job_id)
     staging_dir = worker.staging_dir
-    incoming = Path(staging_dir) / job_id / "incoming"
+    work_name = new_job_id("expand")
+    job_id = None
     try:
+        patterns = scanner_patterns(source.get("exclude_patterns")) + internal_excludes(root, kb)
+        listing = list_source_files(root, patterns)
+        collected = collect_entries(root, listing["files"], Path(staging_dir) / work_name)
+        errors = list(listing["errors"]) + collected["errors"]
+        complete = listing["complete"] and collected["complete"]
+        report["skipped_unsupported"] = len(collected["skipped"])
+        report["errors"] = errors
+
+        previous = []
+        for record in catalog.list_files(source_id=source["id"], active_only=True):
+            previous.append({"path": record["relative_path"], "sha256": record["binary_sha256"]})
+        current = []
+        by_path = {}
+        for entry in collected["entries"]:
+            current.append({"path": entry["path"], "sha256": entry["sha256"]})
+            by_path[entry["path"]] = entry
+        plan = diff_snapshots(previous, current, complete)
+        if not (plan["add"] or plan["modify"] or plan["rename"] or plan["delete"]):
+            return report
+
+        job_id = new_job_id("scan")
+        catalog.create_job(job_id, kb["name"], source_id=source["id"], scan_id=job_id)
+        incoming = Path(staging_dir) / job_id / "incoming"
         incoming.mkdir(parents=True, exist_ok=True)
         actions = []
         for kind in ("add", "modify"):
-            for rel in plan[kind]:
-                info = by_path[rel]
+            for path in plan[kind]:
+                entry = by_path[path]
                 try:
-                    stage_file(root, rel, incoming, rel)
+                    stage_file(entry["root"], entry["rel"], incoming, path)
                 except (OSError, ValueError) as exc:
                     # A file that cannot be staged drops out of this plan and
                     # makes the scan incomplete, which also blocks deletions.
-                    errors.append("{}: {}".format(rel, exc))
+                    errors.append("{}: {}".format(path, exc))
                     complete = False
                     continue
-                actions.append(create_staged_action(kind, rel, binary_sha256=info["sha256"], size=info["size"],
-                                                    mtime_ns=info["mtime_ns"], staged_filename=rel))
+                actions.append(create_staged_action(kind, path, binary_sha256=entry["sha256"],
+                                                    size=entry["size"], mtime_ns=entry["mtime_ns"],
+                                                    staged_filename=path))
         for item in plan["rename"]:
-            info = by_path[item["new"]]
+            entry = by_path[item["new"]]
             actions.append(create_staged_action("rename", item["new"], old_relative_path=item["old"],
-                                                binary_sha256=info["sha256"], size=info["size"],
-                                                mtime_ns=info["mtime_ns"]))
+                                                binary_sha256=entry["sha256"], size=entry["size"],
+                                                mtime_ns=entry["mtime_ns"]))
+        # Deletions need a trustworthy full scan; staging failures above may have
+        # downgraded `complete` after the plan was made, so re-check here.
         if complete:
-            for rel in plan["delete"]:
-                actions.append(create_staged_action("delete", rel))
+            for path in plan["delete"]:
+                actions.append(create_staged_action("delete", path))
         manifest = create_staged_job_manifest(job_id, kb["name"], source["id"], scan_id=job_id,
                                               mode="full_folder", scan_complete=complete,
                                               scan_errors=len(errors), actions=actions)
         job = run_job(catalog, worker, job_id, manifest)
+        report["errors"] = errors
+        report["job"] = job
+        report["status"] = status_for_job(job)
+        return report
     finally:
-        remove_staging(staging_dir, job_id)
-    report["errors"] = errors
-    report["job"] = job
-    report["status"] = status_for_job(job)
-    return report
+        remove_staging(staging_dir, work_name)
+        if job_id is not None:
+            remove_staging(staging_dir, job_id)
 
 
 # Turn one inbox batch into a job on the logical inbox source and archive it.
 # Batch files get the catalog path "<batch id>/<relative path>", so two batches
-# that contain the same file name never collide. Inbox jobs use mode
+# that contain the same file name never collide; ZIPs inside a batch are expanded
+# in staging with provenance "<batch>/x.zip!/inner". Inbox jobs use mode
 # "selected_files", which the worker treats as push mode: it never deletes.
+# A batch is archived as failed if nothing could be ingested or if any file or
+# archive entry was rejected, so problems are visible; originals are kept either way.
 def run_inbox_batch(kb, catalog, worker, batch_id):
     report = {"batch": batch_id, "status": "skipped", "job": None, "skipped_unsupported": []}
     batch_dir = claim_batch(kb, batch_id)
     if batch_dir is None:
         return report
 
+    staging_dir = worker.staging_dir
+    work_name = new_job_id("expand")
     job_id = new_job_id("inbox")
     catalog.create_job(job_id, kb["name"], source_id="inbox", scan_id=job_id)
-    staging_dir = worker.staging_dir
-    incoming = Path(staging_dir) / job_id / "incoming"
-    skipped = []
-    errors = []
-    actions = []
     try:
+        collected = collect_entries(batch_dir, list_batch_files(batch_dir), Path(staging_dir) / work_name,
+                                    prefix=batch_id + "/")
+        errors = list(collected["errors"])
+        skipped = collected["skipped"]
+        report["skipped_unsupported"] = skipped
+        incoming = Path(staging_dir) / job_id / "incoming"
         incoming.mkdir(parents=True, exist_ok=True)
-        for rel in list_batch_files(batch_dir):
-            if get_file_category(rel) == "unsupported":
-                skipped.append(rel)
-                continue
-            staged_rel = "{}/{}".format(batch_id, rel)
-            hashed = hash_source_files(batch_dir, [rel])
-            if hashed["errors"]:
-                errors.extend(hashed["errors"])
-                continue
-            info = hashed["files"][0]
-            existing = catalog.get_file("inbox", staged_rel)
+        actions = []
+        for entry in collected["entries"]:
+            existing = catalog.get_file("inbox", entry["path"])
             kind = "add"
             if existing is not None and existing["active"]:
-                if existing["binary_sha256"] == info["sha256"]:
+                if existing["binary_sha256"] == entry["sha256"]:
                     continue
                 kind = "modify"
             try:
-                stage_file(batch_dir, rel, incoming, staged_rel)
+                stage_file(entry["root"], entry["rel"], incoming, entry["path"])
             except (OSError, ValueError) as exc:
-                errors.append("{}: {}".format(rel, exc))
+                errors.append("{}: {}".format(entry["path"], exc))
                 continue
-            actions.append(create_staged_action(kind, staged_rel, binary_sha256=info["sha256"],
-                                                size=info["size"], mtime_ns=info["mtime_ns"],
-                                                staged_filename=staged_rel))
-        report["skipped_unsupported"] = skipped
+            actions.append(create_staged_action(kind, entry["path"], binary_sha256=entry["sha256"],
+                                                size=entry["size"], mtime_ns=entry["mtime_ns"],
+                                                staged_filename=entry["path"]))
         if not actions and (skipped or errors):
             catalog.update_job(job_id, stage="FAILED_FINAL", error_summary="no ingestible files in batch")
-            reason = "no supported files in batch: unsupported format for {}".format(", ".join(skipped))
+            reason = "no ingestible files in batch"
+            if skipped:
+                reason += "; unsupported format: {}".format(", ".join(skipped))
             if errors:
-                reason = "{}; {}".format(reason, "; ".join(errors))
+                reason += "; {}".format("; ".join(errors))
             finish_batch(kb, batch_id, False, {"error": reason, "catalog_job": job_id,
                                                "unsupported": skipped})
             report["status"] = "failed"
@@ -276,15 +341,25 @@ def run_inbox_batch(kb, catalog, worker, batch_id):
                                               scan_errors=len(errors), actions=actions)
         job = run_job(catalog, worker, job_id, manifest)
     finally:
+        remove_staging(staging_dir, work_name)
         remove_staging(staging_dir, job_id)
 
-    ok = job["stage"] == "COMPLETED"
+    ok = job["stage"] == "COMPLETED" and not errors
     details = {"catalog_job": job_id, "counters": job["counters"], "unsupported": skipped}
     if not ok:
-        details["error"] = job.get("error_summary") or "job ended in stage {}".format(job["stage"])
+        problems = list(errors)
+        if job.get("error_summary"):
+            problems.append(job["error_summary"])
+        details["error"] = "; ".join(problems) or "job ended in stage {}".format(job["stage"])
     finish_batch(kb, batch_id, ok, details)
     report["job"] = job
-    report["status"] = status_for_job(job)
+    if ok:
+        report["status"] = "completed"
+    elif job["stage"] == "COMPLETED":
+        # The job succeeded but some file or archive entry was rejected.
+        report["status"] = "failed"
+    else:
+        report["status"] = status_for_job(job)
     return report
 
 

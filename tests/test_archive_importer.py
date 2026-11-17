@@ -100,11 +100,11 @@ def test_parse_chatgpt_json():
     parsed = detect_and_parse_json(json.dumps(sample_chatgpt))
     assert len(parsed) == 1
     conv = parsed[0]
-    assert conv.id == "conv-123"
-    assert conv.title == "Configurazione Tailwind"
-    assert len(conv.messages) == 2
-    assert conv.messages[0].role == "user"
-    assert "Ricordati che" in conv.messages[0].content
+    assert conv["id"] == "conv-123"
+    assert conv["title"] == "Configurazione Tailwind"
+    assert len(conv["messages"]) == 2
+    assert conv["messages"][0]["role"] == "user"
+    assert "Ricordati che" in conv["messages"][0]["content"]
 
     # Preference extractor
     prefs = extract_user_preferences(parsed)
@@ -135,8 +135,8 @@ def test_parse_claude_json():
     parsed = detect_and_parse_json(json.dumps(sample_claude))
     assert len(parsed) == 1
     conv = parsed[0]
-    assert conv.id == "claude-uuid-1"
-    assert len(conv.messages) == 2
+    assert conv["id"] == "claude-uuid-1"
+    assert len(conv["messages"]) == 2
 
     prefs = extract_user_preferences(parsed)
     assert len(prefs) == 1
@@ -190,8 +190,8 @@ def test_parse_notion_export_json():
     parsed = detect_and_parse_json(json.dumps(notion_data))
     assert len(parsed) == 1
     conv = parsed[0]
-    assert conv.source == "notion"
-    content = conv.messages[0].content
+    assert conv["source"] == "notion"
+    content = conv["messages"][0]["content"]
     assert "# Meeting Agenda" in content
     assert "- Decision on database schema" in content
 
@@ -204,7 +204,7 @@ def test_parse_generic_json_export():
     }
     parsed = detect_and_parse_json(json.dumps(generic_data))
     assert len(parsed) == 1
-    content = parsed[0].messages[0].content
+    content = parsed[0]["messages"][0]["content"]
     assert "LightRAG-KB" in content
     assert "production" in content
     assert "rag" in content
