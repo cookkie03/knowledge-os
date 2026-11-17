@@ -133,10 +133,7 @@ class Retrieval:
         """Open the KB's JSON catalog without silently bypassing legacy data."""
         if self.kb_root is not None:
             return Catalog.open_for_kb(kb_name, kb_root=self.kb_root)
-        kb = self.get_kb(kb_name)
-        if kb and kb.get("data_dir"):
-            directory = Path(kb["data_dir"])
-            return Catalog.open_for_kb(directory.name, kb_root=directory.parent)
+        # The Catalog always lives under KB_ROOT/<kb>, the same place tools.ingest uses.
         return Catalog.open_for_kb(kb_name, kb_root=DEFAULT_KB_ROOT)
 
     def check_server_health(self, port: int, host: str = "127.0.0.1", timeout: float = 2.0) -> bool:
