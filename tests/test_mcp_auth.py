@@ -9,10 +9,8 @@ from starlette.middleware import Middleware
 from fastmcp import FastMCP
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT / "mcp") not in sys.path:
-    sys.path.insert(0, str(ROOT / "mcp"))
 
-from kb_router import MCPAuthMiddleware
+from mcp_server.kb_router import MCPAuthMiddleware
 
 
 def test_mcp_auth_middleware_schemes() -> None:

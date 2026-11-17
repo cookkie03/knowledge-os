@@ -31,8 +31,13 @@ CLIENTS: dict  # defined after all add_* functions
 # (script path + kb name flag) for use across all MCP client registration functions.
 # Inputs/Outputs: python (Path to Python executable), script (Path to MCP script),
 # kb_name (str knowledge base name) -> dict {"command": str, "args": [str, str, str]}
-def _server_entry(python: Path, script: Path, kb_name: str) -> dict:
-    return {"command": str(python), "args": [str(script), "--kb", kb_name]}
+def _server_args(script: Path, kb_name: str | None) -> list[str]:
+    # The router serves every KB, so --kb is added only for a legacy single-KB registration.
+    return [str(script)] + (["--kb", kb_name] if kb_name else [])
+
+
+def _server_entry(python: Path, script: Path, kb_name: str | None) -> dict:
+    return {"command": str(python), "args": _server_args(script, kb_name)}
 
 
 # Merge one server without discarding other settings; back up before overwriting.
@@ -84,7 +89,7 @@ def add_claude_code(mcp_name: str, python: Path, script: Path, kb_name: str, pri
                      source_folder: Path | None = None) -> int:
     cwd = Path.cwd()
     cmd = ["claude", "mcp", "add", "--scope", "project", mcp_name,
-           "--", str(python), str(script), "--kb", kb_name]
+           "--", str(python)] + _server_args(script, kb_name)
     print(f"Registration command (local project: {cwd}):\n  " + " ".join(cmd))
     if print_only:
         return 0
@@ -120,7 +125,7 @@ def add_claude_desktop(mcp_name: str, python: Path, script: Path, kb_name: str, 
 def add_codex(mcp_name: str, python: Path, script: Path, kb_name: str, print_only: bool,
               source_folder: Path | None = None) -> int:
     # codex CLI does not support per-project mcp_servers: config.toml is always global.
-    cmd = ["codex", "mcp", "add", mcp_name, "--", str(python), str(script), "--kb", kb_name]
+    cmd = ["codex", "mcp", "add", mcp_name, "--", str(python)] + _server_args(script, kb_name)
     print("Codex does not support project-local MCPs, registering globally.\nRegistration command:\n  " + " ".join(cmd))
     if print_only:
         return 0

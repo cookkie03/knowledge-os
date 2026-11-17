@@ -6,11 +6,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-if str(ROOT / "mcp") not in sys.path:
-    sys.path.insert(0, str(ROOT / "mcp"))
 
 import pytest
-from kb_router import KBRouter
+from mcp_server.kb_router import KBRouter
 
 
 def test_kb_router_memory_tools():

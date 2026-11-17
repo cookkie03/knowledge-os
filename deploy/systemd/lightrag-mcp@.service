@@ -8,7 +8,7 @@ Requires=lightrag-server@%i.service
 Type=simple
 EnvironmentFile=%h/.config/lightrag-kb/%i.env
 WorkingDirectory=__REPO_ROOT__
-ExecStart=__ENGINE_PYTHON__ __REPO_ROOT__/mcp/lightrag_mcp.py --kb %i --transport streamable-http --host ${MCP_BIND_HOST} --port ${MCP_BIND_PORT} --path ${MCP_PATH}
+ExecStart=__ENGINE_PYTHON__ __REPO_ROOT__/src/run_mcp.py --transport streamable-http --host ${MCP_BIND_HOST} --port ${MCP_BIND_PORT} --path ${MCP_PATH}
 Restart=on-failure
 RestartSec=3
 

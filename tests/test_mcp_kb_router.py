@@ -36,11 +36,9 @@ import requests
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-if str(ROOT / "mcp") not in sys.path:
-    sys.path.insert(0, str(ROOT / "mcp"))
 
-import kb_router
-from kb_router import KBRouter, build_mcp_server
+from mcp_server import kb_router
+from mcp_server.kb_router import KBRouter, build_mcp_server
 from tools.retrieval import (
     STRATEGY_TO_MODE,
     normalize_context as _normalize_context,

@@ -12,14 +12,6 @@ from typing import Any
 import time
 from pathlib import Path
 
-# The CLI runs as a script from src/cli/, so expose the repository's Python packages.
-# ROOT is the repository root: src/cli/ragcli.py -> src/cli -> src -> repo.
-ROOT = Path(__file__).resolve().parent.parent.parent
-SRC = ROOT / "src"
-for p in (SRC, ROOT, SRC / "cli", SRC / "mcp"):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
-
 try:
     import requests
 except ModuleNotFoundError:  # pragma: no cover - exercised via monkeypatch in tests
@@ -27,7 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised via monkeypatch in t
 
 from tools.agents import clients as mcp_clients
 from tools.kb import add_kb, set_data_location, canonicalize_exclude_specs, ensure_kb_dirs, expand_exclude_specs, find_kb, load_registry, merged_runtime_env, normalize_exclude_specs_for_kb, split_exclude_specs, save_registry, storage_mode, write_kb_env
-from tools.system import MCP_SCRIPT, KB_ROOT, global_env, upsert_global_env
+from tools.system import HOME, MCP_SCRIPT, KB_ROOT, global_env, upsert_global_env
 from tools.archive import import_archive_to_kb
 from tools.agents.hooks import (
     capture_post_session,
@@ -42,6 +34,7 @@ from tools.memory import (
     run_dreaming_cycle,
 )
 from tools import ingest as ingest_tools
+from tools.retrieval import Retrieval
 
 LINUX_SYSTEMD_UNITS = (
     "lightrag-server@.service",
@@ -328,7 +321,7 @@ def cmd_service_logs(args: argparse.Namespace) -> None:
 
 
 def cmd_service_install_units(_: argparse.Namespace) -> None:
-    installed = install_user_units(ROOT, Path.home(), global_env())
+    installed = install_user_units(HOME, Path.home(), global_env())
     print(f"installed user units: {', '.join(path.name for path in installed)}")
 
 
@@ -775,39 +768,41 @@ def cmd_move(args: argparse.Namespace) -> None:
         print(f"Warning: {warning}")
 
 
+# Name under which the single multi-KB MCP server is registered in agent clients.
+MCP_SERVER_NAME = "knowledge-os"
+
+
+# Register the single multi-KB MCP server in one or all supported clients.
+# `name` only picks the project folder used by project-level client configs.
 def cmd_mcp_add(args: argparse.Namespace) -> None:
     env = global_env()
-    registry = load_registry(env)
-    kb = find_kb(registry, args.name)
+    kb = find_kb(load_registry(env), args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' not found.")
     engine_python, _ = _ensure_runtime(env)
-    mcp_name = f"lightrag-{args.name}"
     clients = list(mcp_clients.CLIENTS) if args.client == "all" else [args.client]
     rc = 0
     for client in clients:
         if len(clients) > 1:
             print(f"\n== {client} ==")
         fn = mcp_clients.CLIENTS[client]
-        if fn(mcp_name, engine_python, MCP_SCRIPT, args.name, args.print_only, Path(kb["source_dir"])) != 0:
+        if fn(MCP_SERVER_NAME, engine_python, MCP_SCRIPT, None, args.print_only, Path(kb["source_dir"])) != 0:
             rc = 1
     sys.exit(rc)
 
 
+# Remove the single MCP server registration from one or all clients.
 def cmd_mcp_rm(args: argparse.Namespace) -> None:
-    registry = load_registry(global_env())
-    kb = find_kb(registry, args.name)
+    kb = find_kb(load_registry(global_env()), args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' not found.")
-    mcp_name = f"lightrag-{args.name}"
     clients = list(mcp_clients.REMOVERS) if args.client == "all" else [args.client]
     rc = 0
     for client in clients:
         if len(clients) > 1:
             print(f"\n== {client} ==")
-        fn = mcp_clients.REMOVERS[client]
         try:
-            if fn(mcp_name, Path(kb["source_dir"])) != 0:
+            if mcp_clients.REMOVERS[client](MCP_SERVER_NAME, Path(kb["source_dir"])) != 0:
                 rc = 1
         except Exception as exc:
             print(f"Errore durante la de-registrazione da {client}: {exc}")
@@ -869,19 +864,12 @@ def cmd_memory_recall(args: argparse.Namespace) -> None:
 
 # Retrieve generic information from selected KB backends using one hierarchical command.
 def cmd_retrieve_ask(args: argparse.Namespace) -> None:
-    from mcp.kb_router import KBRouter
-    router = KBRouter()
+    router = Retrieval()
     selected = args.kb or [kb["name"] for kb in _registry_kbs(load_registry(global_env()))]
     responses = []
     for kb in selected:
-        responses.append({"kb": kb, "response": json.loads(router.ask(kb=kb, question=args.query, strategy=args.strategy, response_format=args.format))})
+        responses.append({"kb": kb, "response": router.ask(kb=kb, question=args.query, strategy=args.strategy, response_format=args.format)})
     print(json.dumps({"ok": True, "count": len(responses), "results": responses}, indent=2, ensure_ascii=False))
-
-
-# Import a URL through the same hierarchical retrieval namespace as other retrieval tools.
-def cmd_retrieve_url(args: argparse.Namespace) -> None:
-    args.kb = args.kb or find_kb(load_registry(global_env()), args.kb)
-    cmd_import_url(args)
 
 
 def cmd_memory_dream(args: argparse.Namespace) -> None:
@@ -939,19 +927,6 @@ def cmd_import_archive(args: argparse.Namespace) -> None:
         provider=args.format or "auto",
     )
     print(json.dumps({"ok": True, "result": res}, indent=2, ensure_ascii=False))
-
-
-def cmd_import_url(args: argparse.Namespace) -> None:
-    from url_importer import import_media_url_to_kb
-    res = import_media_url_to_kb(
-        kb_name=args.kb,
-        url=args.url,
-        subfolder=args.subfolder,
-        auto_index=not args.no_index,
-        custom_title=args.title,
-    )
-    print(json.dumps({"ok": True, "result": res}, indent=2, ensure_ascii=False))
-
 
 
 def cmd_hook_inject(args: argparse.Namespace) -> None:
@@ -1491,30 +1466,12 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_memory.add_argument("--all", action="store_true")
     retrieve_memory.add_argument("--top-k", type=int, default=5)
     retrieve_memory.set_defaults(func=cmd_memory_recall)
-    retrieve_url = retrieve_sub.add_parser("url", help="import media URL into a KB")
-    retrieve_url.add_argument("kb")
-    retrieve_url.add_argument("url")
-    retrieve_url.add_argument("--title", default=None)
-    retrieve_url.add_argument("--subfolder", default="media")
-    retrieve_url.add_argument("--no-index", action="store_true")
-    retrieve_url.set_defaults(func=cmd_import_url)
-
     # import-archive command
     imp_p = sub.add_parser("import-archive", help="import and normalize chat/data archives (ZIP/JSON)")
     imp_p.add_argument("kb", help="KB name")
     imp_p.add_argument("archive", help="ZIP file or exported folder path")
     imp_p.add_argument("--format", choices=("auto", "chatgpt", "claude", "gemini", "generic"), default="auto")
     imp_p.set_defaults(func=cmd_import_archive)
-
-    # import-url command (yt-dlp + whisper)
-    url_p = sub.add_parser("import-url", help="download media from YouTube, Soundcloud, Instagram, and TikTok with yt-dlp, transcribe with Whisper, and index it in the KB")
-    url_p.add_argument("kb", help="KB name")
-    url_p.add_argument("url", help="URL media (YouTube, Soundcloud, Instagram, TikTok, ecc.)")
-    url_p.add_argument("--title", default=None, help="titolo personalizzato")
-    url_p.add_argument("--subfolder", default="media", help="sottocartella in source_dir (default: media)")
-    url_p.add_argument("--no-index", action="store_true", help="non inviare al server LightRAG (salva solo il file markdown)")
-    url_p.set_defaults(func=cmd_import_url)
-
 
     # hook command
     hook_parser = sub.add_parser("hook", help="hooks for coding agents (pre-prompt and post-session)")

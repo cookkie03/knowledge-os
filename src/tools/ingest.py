@@ -65,7 +65,7 @@ def start_background(kb_name: str, env: dict[str, str] | None = None) -> dict:
     env = env or global_env()
     kb = _get_kb(kb_name, env)
     log_path = Path(kb["data_dir"]) / "ingest.log"
-    command = [env["ENGINE_PYTHON"], str(HOME / "src" / "cli" / "ragcli.py"), "_worker_run", kb_name]
+    command = [env["ENGINE_PYTHON"], str(HOME / "src" / "run_cli.py"), "_worker_run", kb_name]
     pid = spawn_detached_job(command, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
     return {"kb": kb_name, "pid": pid, "log": str(log_path)}
 

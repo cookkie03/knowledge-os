@@ -5,13 +5,11 @@ from ragcli import build_parser
 from tools.memory import remember_memory
 
 
-def test_retrieve_hierarchical_parser_has_memory_and_url():
+def test_retrieve_hierarchical_parser_has_memory():
     parser = build_parser()
     memory_args = parser.parse_args(["retrieve", "memory", "query text"])
-    url_args = parser.parse_args(["retrieve", "url", "kb", "https://example.com/video"])
     assert memory_args.query == "query text"
     assert memory_args.kb is None
-    assert url_args.kb == "kb"
 
 
 def test_memory_scope_defaults_to_all_kbs(tmp_path, monkeypatch, capsys):

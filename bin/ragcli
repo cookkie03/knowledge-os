@@ -9,6 +9,6 @@ done
 HERE="$(cd "$(dirname "$SOURCE")" && pwd)"
 ENGINE_PY="$HERE/../.venv/bin/python"
 if [ -x "$ENGINE_PY" ]; then
-  exec "$ENGINE_PY" "$HERE/../src/cli/ragcli.py" "$@"
+  exec "$ENGINE_PY" "$HERE/../src/run_cli.py" "$@"
 fi
-exec python3 "$HERE/../src/cli/ragcli.py" "$@"
+exec python3 "$HERE/../src/run_cli.py" "$@"

@@ -19,8 +19,7 @@ KB_ROOT = HOME / "kb"
 ENGINE_DIR = HOME / ".venv"
 ENGINE_PYTHON = ENGINE_DIR / "bin" / "python"
 LIGHTRAG_SERVER = ENGINE_DIR / "bin" / "lightrag-server"
-MCP_SCRIPT = HOME / "src" / "mcp" / "lightrag_mcp.py"
-INGEST_SCRIPT = HOME / "src" / "cli" / "ingest.py"
+MCP_SCRIPT = HOME / "src" / "run_mcp.py"
 
 
 # Write a text file atomically: lock, temporary file in the same directory, fsync,

@@ -24,10 +24,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 from pipeline.parsers import validate_safe_relative_path
 
 logger = logging.getLogger("storage.inbox")
