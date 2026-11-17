@@ -24,7 +24,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 # Valid memory types and statuses
 VALID_MEMORY_TYPES: set[str] = {"preference", "decision", "episodic", "fact"}

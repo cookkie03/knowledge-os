@@ -25,7 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised via monkeypatch in t
     requests = None
 
 import mcp_clients
-from tools.kb import add_kb, canonicalize_exclude_specs, ensure_kb_dirs, expand_exclude_specs, find_kb, load_registry, merged_runtime_env, normalize_exclude_specs_for_kb, split_exclude_specs, save_registry, storage_mode, write_kb_env
+from tools.kb import add_kb, set_data_location, canonicalize_exclude_specs, ensure_kb_dirs, expand_exclude_specs, find_kb, load_registry, merged_runtime_env, normalize_exclude_specs_for_kb, split_exclude_specs, save_registry, storage_mode, write_kb_env
 from tools.system import INGEST_SCRIPT, MCP_SCRIPT, KB_ROOT, global_env, upsert_global_env
 from archive_importer import import_archive_to_kb
 from agent_hooks import (
@@ -909,37 +909,27 @@ def cmd_worker_run(args: argparse.Namespace) -> None:
 
 
 def cmd_move(args: argparse.Namespace) -> None:
-    env = global_env()
-    registry = load_registry(env)
+    # Thin adapter over tools.kb.set_data_location: without --to the location is
+    # toggled between knowledge-os and the source folder, as before.
+    registry = load_registry(global_env())
     kb = find_kb(registry, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' not found.")
-    if _kb_server_state(kb) != "down":
-        sys.exit(
-            f"Stop the server for '{args.name}' first with `ragcli stop {args.name}`."
-        )
-    current = Path(kb["data_dir"]).resolve()
-    if storage_mode(kb) == "source":
-        destination = (KB_ROOT / kb["name"]).resolve()
-    else:
-        destination = (Path(kb["source_dir"]) / ".lightrag").resolve()
-    if current == destination:
-        print(f"Nessuno spostamento necessario: already at {destination}")
+    location = args.to or ("repo" if storage_mode(kb) == "source" else "source")
+    try:
+        result = set_data_location(args.name, location, source=args.source, dry_run=args.dry_run)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
         return
-    if destination.exists() and any(destination.iterdir()):
-        sys.exit(f"Destination is not empty: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if current.exists():
-        shutil.move(str(current), str(destination))
-    else:
-        destination.mkdir(parents=True, exist_ok=True)
-    kb["data_dir"] = str(destination)
-    kb["derived_dir"] = str(destination / "derived")
-    kb["rag_storage"] = str(destination / "rag_storage")
-    ensure_kb_dirs(kb)
-    write_kb_env(kb, env)
-    save_registry(registry)
-    print(f"KB '{args.name}' spostata in {destination}")
+    if not result["moved"]:
+        label = "Dry run" if result["dry_run"] else "No move needed"
+        print(f"{label}: data of '{args.name}' {result['from']} -> {result['to']}")
+        return
+    print(f"KB '{args.name}' data moved to {result['to']} ({result['catalog_paths_updated']} catalog paths updated).")
+    for warning in result["warnings"]:
+        print(f"Warning: {warning}")
 
 
 def cmd_mcp_add(args: argparse.Namespace) -> None:
@@ -1639,8 +1629,11 @@ def build_parser() -> argparse.ArgumentParser:
     auth_clear = auth_sub.add_parser("clear", help="rimuove la password (accesso libero)")
     auth_clear.set_defaults(func=cmd_auth_clear)
 
-    move = sub.add_parser("move", help="move data_dir between source path and local repo")
+    move = sub.add_parser("move", help="move a KB's data between knowledge-os and a source folder")
     move.add_argument("name")
+    move.add_argument("--to", choices=["repo", "source"], help="destination (default: toggle)")
+    move.add_argument("--source", help="source folder that will host the data (required with several sources)")
+    move.add_argument("--dry-run", action="store_true", help="check the move without changing anything")
     move.set_defaults(func=cmd_move)
 
     service = sub.add_parser("service", help="manage Linux systemd --user services")
