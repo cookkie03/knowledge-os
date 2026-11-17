@@ -10,7 +10,7 @@ def test_setup_script_contains_linux_bootstrap_phases() -> None:
     assert "pytest" in script
     assert "DOCLING_PLATFORM" in script
     assert "PUBLIC_MCP_KB" in script
-    assert "lightrag-mcp@" in script
+    assert "lightrag-mcp.service" in script
     assert "systemctl --user daemon-reload" in script
     assert "tailscale serve --bg" in script
     assert "tailscale funnel --bg" in script

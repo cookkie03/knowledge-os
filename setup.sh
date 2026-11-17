@@ -274,7 +274,7 @@ if [ "$OS_NAME" = "Linux" ]; then
       write_public_kb_env "$PUBLIC_MCP_KB"
       systemctl --user enable --now "lightrag-server@${PUBLIC_MCP_KB}.service"
       systemctl --user enable --now "lightrag-watchdog@${PUBLIC_MCP_KB}.service"
-      systemctl --user enable --now "lightrag-mcp@${PUBLIC_MCP_KB}.service"
+      systemctl --user enable --now "lightrag-mcp.service"
       PUBLISH_READY=1
     else
       echo "    PUBLIC_MCP_KB='$PUBLIC_MCP_KB' not found in registry: skipping public services startup"

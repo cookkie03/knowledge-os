@@ -6,14 +6,15 @@ from types import SimpleNamespace
 import pytest
 
 import ragcli
+from tools import services
 
 
 def test_service_parser_accepts_status_restart_logs() -> None:
     parser = ragcli.build_parser()
 
     status_args = parser.parse_args(["service", "status"])
-    restart_args = parser.parse_args(["service", "restart", "lightrag-mcp@.service"])
-    logs_args = parser.parse_args(["service", "logs", "lightrag-mcp@.service"])
+    restart_args = parser.parse_args(["service", "restart", "lightrag-mcp.service"])
+    logs_args = parser.parse_args(["service", "logs", "lightrag-mcp.service"])
 
     assert status_args.service_cmd == "status"
     assert restart_args.service_cmd == "restart"
@@ -32,7 +33,7 @@ def test_doctor_report_requires_executable_runtime_and_server(
     server.chmod(0o755)
 
     monkeypatch.setattr(
-        ragcli,
+        services,
         "global_env",
         lambda: {
             "ENGINE_PYTHON": str(runtime),
@@ -40,12 +41,12 @@ def test_doctor_report_requires_executable_runtime_and_server(
         },
     )
     monkeypatch.setattr(
-        ragcli,
-        "_systemctl_user",
+        services,
+        "systemctl_user",
         lambda *args: type("R", (), {"returncode": 3, "stdout": "inactive\n", "stderr": ""})(),
     )
 
-    report = ragcli._doctor_report()
+    report = services.doctor_report()
 
     assert report[:2] == [
         {"name": "runtime", "ok": False, "details": f"not executable ({runtime})"},
@@ -55,8 +56,8 @@ def test_doctor_report_requires_executable_runtime_and_server(
 
 def test_doctor_reports_missing_runtime(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(
-        ragcli,
-        "_doctor_report",
+        services,
+        "doctor_report",
         lambda: [{"name": "runtime", "ok": False, "details": "missing"}],
     )
 
@@ -72,8 +73,8 @@ def test_doctor_allows_healthy_report_with_down_in_path(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(
-        ragcli,
-        "_doctor_report",
+        services,
+        "doctor_report",
         lambda: [{"name": "runtime", "ok": True, "details": "/tmp/downloads/python"}],
     )
 
@@ -92,7 +93,7 @@ def test_service_status_uses_systemctl_user(
         calls.append(cmd)
         return type("R", (), {"returncode": 0, "stdout": "active\n", "stderr": ""})()
 
-    monkeypatch.setattr(ragcli.subprocess, "run", fake_run)
+    monkeypatch.setattr(services.subprocess, "run", fake_run)
 
     ragcli.cmd_service_status(SimpleNamespace(name="lightrag-server@second-brain.service"))
 
@@ -107,14 +108,14 @@ def test_service_status_reports_installed_templates_when_no_public_kb(
 ) -> None:
     systemd_dir = tmp_path / ".config" / "systemd" / "user"
     systemd_dir.mkdir(parents=True)
-    for unit in ("lightrag-server@.service", "lightrag-watchdog@.service", "lightrag-mcp@.service"):
+    for unit in ("lightrag-server@.service", "lightrag-watchdog@.service", "lightrag-mcp.service"):
         (systemd_dir / unit).write_text("[Unit]\n")
 
     monkeypatch.setattr(ragcli, "global_env", lambda: {"PUBLIC_MCP_KB": ""})
     monkeypatch.setattr(ragcli.Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(
-        ragcli,
-        "_systemctl_user",
+        services,
+        "systemctl_user",
         lambda *args: type("R", (), {"returncode": 0, "stdout": "active\n", "stderr": ""})(),
     )
 
@@ -123,7 +124,7 @@ def test_service_status_reports_installed_templates_when_no_public_kb(
     output = capsys.readouterr().out
     assert "lightrag-server@.service: installed" in output
     assert "lightrag-watchdog@.service: installed" in output
-    assert "lightrag-mcp@.service: installed" in output
+    assert "lightrag-mcp.service: active" in output
 
 
 def test_service_restart_uses_systemctl_user_for_specific_unit(
@@ -136,12 +137,12 @@ def test_service_restart_uses_systemctl_user_for_specific_unit(
         calls.append(cmd)
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-    monkeypatch.setattr(ragcli.subprocess, "run", fake_run)
+    monkeypatch.setattr(services.subprocess, "run", fake_run)
 
-    ragcli.cmd_service_restart(SimpleNamespace(name="lightrag-mcp@.service"))
+    ragcli.cmd_service_restart(SimpleNamespace(name="lightrag-mcp.service"))
 
-    assert calls == [["systemctl", "--user", "restart", "lightrag-mcp@.service"]]
-    assert "restarted lightrag-mcp@.service" in capsys.readouterr().out
+    assert calls == [["systemctl", "--user", "restart", "lightrag-mcp.service"]]
+    assert "restarted lightrag-mcp.service" in capsys.readouterr().out
 
 
 def test_service_install_units_writes_repo_specific_paths(
@@ -154,11 +155,11 @@ def test_service_install_units_writes_repo_specific_paths(
     systemd_src.mkdir(parents=True)
     (systemd_src / "lightrag-server@.service").write_text("ExecStart=__LIGHTRAG_SERVER_BIN__\n")
     (systemd_src / "lightrag-watchdog@.service").write_text("home=__HOME__\n")
-    (systemd_src / "lightrag-mcp@.service").write_text("ExecStart=__ENGINE_PYTHON__ __REPO_ROOT__/mcp/lightrag_mcp.py\n")
+    (systemd_src / "lightrag-mcp.service").write_text("ExecStart=__ENGINE_PYTHON__ __REPO_ROOT__/mcp/lightrag_mcp.py\n")
     home = tmp_path / "home"
     home.mkdir()
 
-    installed = ragcli.install_user_units(
+    installed = services.install_user_units(
         repo_root,
         home,
         env={
@@ -172,7 +173,7 @@ def test_service_install_units_writes_repo_specific_paths(
     assert str(repo_root / ".venv/bin/lightrag-server") in server_unit
     assert "__LIGHTRAG_SERVER_BIN__" not in server_unit
 
-    monkeypatch.setattr(ragcli, "install_user_units", lambda *_args, **_kwargs: installed)
+    monkeypatch.setattr(services, "install_user_units", lambda *_args, **_kwargs: installed)
     monkeypatch.setattr(ragcli, "global_env", lambda: {"ENGINE_PYTHON": "x", "LIGHTRAG_SERVER_BIN": "y"})
     monkeypatch.setattr(ragcli.Path, "home", classmethod(lambda cls: home))
 
@@ -183,7 +184,7 @@ def test_service_install_units_writes_repo_specific_paths(
 
 def test_doctor_reports_service_status_lines(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        ragcli,
+        services,
         "global_env",
         lambda: {
             "ENGINE_PYTHON": "/tmp/runtime/python",
@@ -192,14 +193,14 @@ def test_doctor_reports_service_status_lines(monkeypatch: pytest.MonkeyPatch) ->
         },
     )
     monkeypatch.setattr(
-        ragcli,
-        "_systemctl_user",
+        services,
+        "systemctl_user",
         lambda *args: type("R", (), {"returncode": 0, "stdout": "active\n", "stderr": ""})(),
     )
     monkeypatch.setattr(Path, "is_file", lambda self: True)
-    monkeypatch.setattr(ragcli.os, "access", lambda path, mode: True)
+    monkeypatch.setattr(services.os, "access", lambda path, mode: True)
 
-    report = ragcli._doctor_report()
+    report = services.doctor_report()
 
     service_row = next(item for item in report if item["name"] == "lightrag-server@.service")
     assert service_row == {
@@ -210,15 +211,15 @@ def test_doctor_reports_service_status_lines(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_status_units_expand_public_kb_instances(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ragcli, "load_registry", lambda env: {"kbs": [{"name": "second-brain"}]})
-    monkeypatch.setattr(ragcli, "find_kb", lambda registry, name: {"name": name})
+    monkeypatch.setattr(services, "load_registry", lambda env: {"kbs": [{"name": "second-brain"}]})
+    monkeypatch.setattr(services, "find_kb", lambda registry, name: {"name": name})
 
-    units = ragcli._status_linux_units({"PUBLIC_MCP_KB": "second-brain"})
+    units = services.status_linux_units({"PUBLIC_MCP_KB": "second-brain"})
 
     assert units == [
         "lightrag-server@second-brain.service",
         "lightrag-watchdog@second-brain.service",
-        "lightrag-mcp@second-brain.service",
+        "lightrag-mcp.service",
     ]
 
 

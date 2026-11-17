@@ -1,12 +1,14 @@
 [Unit]
-Description=LightRAG MCP server for KB %i
-After=network-online.target lightrag-server@%i.service
+Description=KnowledgeOS multi-KB MCP server
+After=network-online.target
 Wants=network-online.target
-Requires=lightrag-server@%i.service
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/lightrag-kb/%i.env
+Environment=MCP_BIND_HOST=127.0.0.1
+Environment=MCP_BIND_PORT=8743
+Environment=MCP_PATH=/mcp
+EnvironmentFile=-%h/.config/lightrag-kb/mcp.env
 WorkingDirectory=__REPO_ROOT__
 ExecStart=__ENGINE_PYTHON__ __REPO_ROOT__/src/run_mcp.py --transport streamable-http --host ${MCP_BIND_HOST} --port ${MCP_BIND_PORT} --path ${MCP_PATH}
 Restart=on-failure
