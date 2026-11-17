@@ -18,5 +18,6 @@ Spec: `docs/centralize-tools/spec.md`. Ogni ticket è autonomo. Dipendenze tra p
 
 - ✅ **T7 · `tools/` unico** (T5). Un solo registro KB e una sola memoria. Include `tools/kb.set_data_location` (default dati in `kb/<kb-id>/.lightrag/` dentro knowledge-os; switch verso/da una cartella sorgente scelta con l'argomento `source`; dry-run, lock di scrittura, copia verificata prima di sostituire) e il default dei nuovi dati in `kb/<kb-id>/.lightrag/` al posto di `<sorgente>/.lightrag`.
 - **T8 · Adapter CLI e MCP** (T7). Albero comandi (incluso `kb data-location`), un solo server MCP, `mcp auth`, test architetturale degli import.
+  - Stato: 🟡 fatto: `tools/retrieval`, `tools/agents`, `tools/archive`, un solo server MCP multi-KB (`mcp_server/`, auth solo header), `ragcli ingest/inbox/source/job` su `tools.ingest`, entry point in `src/` senza `sys.path`, `tests/test_architecture.py`, rimossi ingest legacy e URL importer. Resta: `tools.system` doctor/servizi, `mcp auth`, `--json` globale e `kb data-location`, `memory`/`doctor`/`service`/`exclude` del CLI ancora con logica propria, unit systemd per-KB da ridurre a un solo servizio MCP.
 - **T9 · Rimozioni** (T8). URL importer, sync server/protocollo, link.
 - **T10 · Migrazione dati con dry-run** (T9). Poi test end-to-end sulla KB trading e sull'inbox con gli ZIP dell'utente.
