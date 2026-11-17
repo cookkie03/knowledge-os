@@ -20,7 +20,6 @@ Implements §4 and §5 of the monolithic plan:
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from pathlib import Path
@@ -227,21 +226,11 @@ class IngestionWorker:
             logger.info("Job '%s' already completed (idempotent).", job_id)
             return job
 
-        # Read staged requests before locking; admit them under the writer lock.
-        raw_manifest = None
+        # Staged manifests written by a remote sync client are no longer supported (T9).
         if manifest is None:
-            if not self.staging_dir:
-                raise IngestionWorkerError(f"No staging directory configured for job {job_id}")
-            manifest_file = self.staging_dir / job_id / "manifest.json"
-            if not manifest_file.exists():
-                raise IngestionWorkerError(f"Missing manifest file in staging: {manifest_file}")
-            try:
-                validate_safe_relative_path(f"{job_id}/manifest.json", base_dir=self.staging_dir, allow_symlinks=False)
-                raw_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-            except (OSError, ValueError, SafePathError) as exc:
-                return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary=str(exc))
+            return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary="Remote staged manifests are no longer supported")
 
-        if manifest is not None and (manifest["job_id"], manifest["kb_id"], manifest["source_id"]) != (job["job_id"], job["kb_id"], job["source_id"]):
+        if (manifest["job_id"], manifest["kb_id"], manifest["source_id"]) != (job["job_id"], job["kb_id"], job["source_id"]):
             return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary="Manifest identity does not match job")
 
         source_id = job["source_id"]
@@ -259,13 +248,6 @@ class IngestionWorker:
 
             # Step 1.5: Recover any pending checkpoints left from previous crashes (§5)
             self.indexer.recover_pending_checkpoints()
-
-            if manifest is None:
-                from sync.server import admit_manifest
-                try:
-                    manifest = admit_manifest(self.catalog, job_id, raw_manifest, self.staging_dir / job_id / "incoming")
-                except (ValueError, KeyError, TypeError, OSError) as exc:
-                    return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary=str(exc))
 
             # Step 2: Validate safe sandboxed paths across all manifest actions (§11 #10)
             for act in manifest["actions"]:

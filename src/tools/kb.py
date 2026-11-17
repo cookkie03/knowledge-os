@@ -31,18 +31,14 @@ DERIVED_SUBDIRS = ("text", "pdf", "images", "office", "audio", "cache", "manifes
 
 # Build a normalized KB configuration dictionary.
 # Invariant: Each KB holds configuration for its directories, network port,
-# exclusion patterns, linked sources, and background link automation toggles.
+# exclusion patterns and extra sources.
 # The returned dict is used as the authoritative KB configuration; all pipeline
 # components read from this dict so there is a single source of truth for KB
-# parameters such as port, exclude patterns, and linkage settings.
+# parameters such as port and exclude patterns.
 def create_kb_entry(name: str, source_dir: str, data_dir: str, derived_dir: str, rag_storage: str,
                     port: int, exclude: list[str] | None = None,
-                    sources: list[str] | None = None,
-                    link: dict[str, bool] | None = None) -> dict:
+                    sources: list[str] | None = None) -> dict:
     """Create a KB entry as a plain dict."""
-    default_link = {"consume": True, "ingest": True}
-    if link is not None:
-        default_link.update(link)
     return {
         "name": name,
         "source_dir": source_dir,
@@ -52,7 +48,6 @@ def create_kb_entry(name: str, source_dir: str, data_dir: str, derived_dir: str,
         "port": port,
         "exclude": list(exclude or []),
         "sources": list(sources or []),
-        "link": default_link,
     }
 
 
@@ -79,7 +74,6 @@ def normalize_kb(entry: dict, env: dict[str, str] | None = None) -> dict:
         port=int(entry.get("port") or env["BASE_PORT"]),
         exclude=entry.get("exclude", []),
         sources=entry.get("sources", []),
-        link=entry.get("link"),
     )
 
 
@@ -114,8 +108,6 @@ def _registry_entry(kb: dict) -> dict:
         entry["exclude"] = list(kb["exclude"])
     if kb.get("sources"):
         entry["sources"] = list(kb["sources"])
-    if kb.get("link") is not None:
-        entry["link"] = dict(kb["link"])
     return entry
 
 
