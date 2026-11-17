@@ -327,8 +327,10 @@ class IngestionWorker:
             )
 
             source_rec = self.catalog.get_source(source_id)
-            source_origin = source_rec["origin_folder"] if source_rec else ""
-            source_host = source_rec["origin_host"] if source_rec else ""
+            # Schema v2 records carry "path"; legacy origin_* fields remain only
+            # until sync/server is removed (T9).
+            source_origin = (source_rec.get("path") or source_rec.get("origin_folder", "")) if source_rec else ""
+            source_host = source_rec.get("origin_host", "") if source_rec else ""
 
             # Process deletes last and only after every other action succeeds.
             # A failed upload or indexing operation must never imply a deletion.

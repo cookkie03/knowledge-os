@@ -65,7 +65,7 @@ def test_catalog_init_memory_and_file(tmp_path: Path):
     with Catalog(db_path) as cat:
         assert cat.path == db_path.resolve()
         cat.add_source("local", "Local")
-    assert json.loads(db_path.read_text())["version"] == 1
+    assert json.loads(db_path.read_text())["version"] == 2
 
 
 def test_catalog_open_for_kb(tmp_path: Path):

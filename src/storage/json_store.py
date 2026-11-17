@@ -38,10 +38,10 @@ class JsonStore:
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 self.__exit__(type(exc), exc, None)
                 raise ValueError("invalid catalog snapshot") from exc
-            # Reject snapshots whose schema is not the expected version-1 dict of
-            # record collections; a missing or malformed collection would let later
-            # code dereference None and corrupt the catalog silently.
-            if not isinstance(self._data, dict) or self._data.get("version") != 1:
+            # Accept any snapshot whose version is an int; the catalog's
+            # upgrade_catalog_data refuses to rewrite versions newer than the
+            # current schema and upgrades older ones in place.
+            if not isinstance(self._data, dict) or not isinstance(self._data.get("version"), int):
                 self.__exit__(None, None, None)
                 raise ValueError("invalid or unsupported catalog snapshot")
             for key in ("sources", "files", "documents", "jobs"):

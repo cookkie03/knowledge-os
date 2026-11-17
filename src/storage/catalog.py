@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import tempfile
 from datetime import datetime, timezone
@@ -15,6 +16,57 @@ VALID_SOURCE_MODES = {"full_folder", "selected_files"}
 # Every stage a job can be in; used to gate transitions and to detect active jobs.
 VALID_JOB_STAGES = {"PREPARING", "TRANSFERRING", "VALIDATING", "PROCESSING", "COMPLETED", "FAILED_RETRYABLE", "FAILED_FINAL", "NEEDS_REVIEW"}
 DEFAULT_JOB_COUNTERS = dict.fromkeys(("added", "modified", "renamed", "deleted", "unchanged", "failed", "warnings"), 0)
+# The on-disk JSON schema version this code can read and write. Older code must
+# never silently rewrite a newer catalog, so upgrade_catalog_data refuses when the
+# stored version is higher and only upgrades in place when it is lower.
+CATALOG_SCHEMA_VERSION = 2
+# Allowed source types: primary (the KB's main source dir), folder (a mirrored
+# sub-folder), and inbox (auto-derived location, never configured by callers).
+VALID_SOURCE_TYPES = {"primary", "folder", "inbox"}
+
+
+def source_id_for(source_type, path=""):
+    """Return a stable identifier for a source type, used so migrations are idempotent.
+
+    What this does: primary and inbox have fixed ids ("primary"/"inbox") because there
+    is at most one of each per KB; folder ids are derived from the resolved path so the
+    same folder always maps to the same id across runs.
+
+    Inputs/Outputs: source_type (str in VALID_SOURCE_TYPES), path (str, optional) -> str id
+    """
+    if source_type == "primary":
+        return "primary"
+    if source_type == "inbox":
+        return "inbox"
+    resolved = str(Path(path).expanduser().resolve())
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+    return "folder-" + digest[:12]
+
+
+def upgrade_catalog_data(data):
+    """Upgrade a loaded catalog snapshot to the current schema version, in place.
+
+    What this does: refuses to rewrite a catalog written by newer code (version higher
+    than CATALOG_SCHEMA_VERSION raises RuntimeError so no data is silently lost), and
+    upgrades version-1 records in place by adding the "type"/"path" fields derived from
+    the legacy origin_folder. The upgrade is idempotent: running it on an already-upgraded
+    record changes nothing.
+
+    Inputs/Outputs: data (dict, the parsed JSON snapshot) -> None (mutates data in place)
+    """
+    stored_version = data.get("version", 1)
+    if stored_version > CATALOG_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"catalog version {stored_version} is newer than supported "
+            f"({CATALOG_SCHEMA_VERSION}); refusing to rewrite"
+        )
+    if stored_version >= CATALOG_SCHEMA_VERSION:
+        return
+    for source in data.get("sources", {}).values():
+        if "type" not in source:
+            source["type"] = "folder"
+            source["path"] = source.get("origin_folder", "")
+    data["version"] = CATALOG_SCHEMA_VERSION
 #
 # What this does: defines the catalog module for managing a single KB's sources, file
 # occurrences, documents, and jobs using JSON storage. Specifies the valid source modes
@@ -54,9 +106,13 @@ def generate_canonical_doc_id(binary_sha256, revision=1):
     return f"doc_{prefix}_r{revision}" if revision > 1 else f"doc_{prefix}"
 
 
+# Deprecated: origin_host/origin_folder are kept only for backward compatibility with
+# pre-T4 records (see upgrade_catalog_data). New code should read "type"/"path" instead.
+
 def create_source_record(source_id, name, origin_host="", origin_folder="", mode="full_folder",
                          include_patterns=None, exclude_patterns=None, deletion_policy="guarded",
-                         status="active", created_at=None, updated_at=None, last_complete_scan_id=None):
+                         status="active", created_at=None, updated_at=None, last_complete_scan_id=None,
+                         source_type="folder", path=""):
     """Create a source record as a plain dict.
 
     What this does: creates a new source record dict with the provided parameters, using
@@ -73,6 +129,8 @@ def create_source_record(source_id, name, origin_host="", origin_folder="", mode
     return {
         "id": source_id,
         "name": name,
+        "type": source_type,
+        "path": path,
         "origin_host": origin_host,
         "origin_folder": origin_folder,
         "mode": mode,
@@ -84,6 +142,41 @@ def create_source_record(source_id, name, origin_host="", origin_folder="", mode
         "created_at": now,
         "updated_at": updated_at or now,
     }
+
+
+# Validate a source path for its type and return the form to store.
+# Security: primary/folder paths are always stored resolved (absolute, no "..",
+# symlinks followed once here) so later scans cannot be redirected by a crafted
+# relative path. The inbox location is derived from the KB data dir and must
+# never be supplied by callers, otherwise intake could write outside the KB.
+def _validated_source_path(source_type, path):
+    if source_type not in VALID_SOURCE_TYPES:
+        raise ValueError(f"Invalid source type: {source_type}")
+    if source_type == "inbox":
+        if path:
+            raise ValueError("inbox sources must not declare a path")
+        return ""
+    if not path:
+        raise ValueError(f"{source_type} sources require a path")
+    expanded = Path(path).expanduser()
+    if not expanded.is_absolute():
+        raise ValueError("source path must be absolute")
+    return str(expanded.resolve())
+
+
+# Enforce per-KB source invariants: at most one primary, at most one inbox, and
+# no two sources on the same resolved path (they would index the same files twice
+# under different source ids). `sources` is the live snapshot dict; the caller
+# holds the catalog lock. `own_id` is skipped so updates do not clash with themselves.
+def _check_source_unique(sources, own_id, source_type, stored_path):
+    for other_id, other in sources.items():
+        if other_id == own_id:
+            continue
+        other_type = other.get("type", "folder")
+        if source_type in ("primary", "inbox") and other_type == source_type:
+            raise ValueError(f"KB already has a {source_type} source: {other_id}")
+        if stored_path and other.get("path") == stored_path:
+            raise ValueError(f"path already registered by source {other_id}")
 
 
 def create_document_record(canonical_doc_id, derived_hash=None, extracted_artifact_path=None,
@@ -171,6 +264,9 @@ class _CatalogTransaction:
             # Outermost nesting level: open the real snapshot under the lock.
             self._data = self._catalog._store.__enter__()
             self._owns_transaction = True
+            # Upgrade the snapshot to the current schema version before any caller
+            # reads or writes it; the upgrade is persisted by the normal commit on exit.
+            upgrade_catalog_data(self._data)
         else:
             # Inner nesting level: reuse the already-open snapshot.
             self._data = self._catalog._data
@@ -250,19 +346,44 @@ class Catalog:
         return _CatalogTransaction(self)
 
     def add_source(self, source_id, name, origin_host="", origin_folder="", mode="full_folder",
-                   include_patterns=None, exclude_patterns=None, deletion_policy="guarded", status="active"):
+                   include_patterns=None, exclude_patterns=None, deletion_policy="guarded", status="active",
+                   source_type=None, path=""):
         """Register a uniquely identified source in this KB."""
         if mode not in VALID_SOURCE_MODES:
             raise ValueError(f"Invalid source mode: {mode}")
+        if source_type is None:
+            # Legacy untyped call (sync/server and pre-T5 callers): store a folder
+            # whose path mirrors origin_folder, without the typed-path checks.
+            # Remove this branch once T5/T9 port every caller to typed sources.
+            source_type = "folder"
+            stored_path = origin_folder
+        else:
+            stored_path = _validated_source_path(source_type, path)
         now = utc_now_iso()
         source = create_source_record(source_id, name, origin_host, origin_folder, mode,
                                        include_patterns or [], exclude_patterns or [],
-                                       deletion_policy, status, created_at=now, updated_at=now)
+                                       deletion_policy, status, created_at=now, updated_at=now,
+                                       source_type=source_type, path=stored_path)
         with self._snapshot() as data:
             if source_id in data["sources"]:
                 raise ValueError("source already exists")
+            # Uniqueness is checked under the snapshot lock so two concurrent
+            # writers cannot both register a second primary/inbox or the same folder.
+            _check_source_unique(data["sources"], source_id, source_type, stored_path)
             data["sources"][source_id] = source
         return copy_record(source)
+
+    # Return the source registered on this filesystem path, or None. The input is
+    # resolved first so "~/x", "/a/../x" and "/x" all match the same stored record.
+    def find_source_by_path(self, path):
+        if not path:
+            return None
+        resolved = str(Path(path).expanduser().resolve())
+        with self._snapshot() as data:
+            for _, source in sorted(data["sources"].items()):
+                if source.get("path") == resolved:
+                    return copy_record(source)
+        return None
 
     def get_source(self, source_id):
         """Return source metadata, or None if the source is unknown."""
@@ -276,9 +397,11 @@ class Catalog:
             return [copy_record(v) for _, v in sorted(data["sources"].items()) if status is None or v["status"] == status]
 
     def update_source(self, source_id, **changes):
-        """Update source metadata without changing its stable identifier."""
+        """Update source metadata without changing its stable identifier or type."""
+        # "type" is deliberately absent: changing a source's type would break the
+        # one-primary/one-inbox invariant and the meaning of its file records.
         allowed = {"name", "origin_host", "origin_folder", "mode", "include_patterns",
-                   "exclude_patterns", "deletion_policy", "status", "last_complete_scan_id"}
+                   "exclude_patterns", "deletion_policy", "status", "last_complete_scan_id", "path"}
         if set(changes) - allowed:
             raise TypeError("unknown source fields")
         if changes.get("mode") is not None and changes["mode"] not in VALID_SOURCE_MODES:
@@ -287,6 +410,10 @@ class Catalog:
             source = data["sources"].get(source_id)
             if source is None:
                 raise KeyError(source_id)
+            if changes.get("path") is not None:
+                source_type = source.get("type", "folder")
+                changes["path"] = _validated_source_path(source_type, changes["path"])
+                _check_source_unique(data["sources"], source_id, source_type, changes["path"])
             for k, v in changes.items():
                 if v is not None:
                     source[k] = v
