@@ -64,9 +64,9 @@ def test_mcp_auth_middleware_schemes() -> None:
         )
         assert res_header.status_code != 401
 
-        # 6. Valid Query Parameter (?token=...) -> passes auth gate
+        # 6. Token in the URL is rejected: URLs leak into logs and proxies
         res_query = client.post(
             f"/mcp?token={token}",
             json={"jsonrpc": "2.0", "id": 5, "method": "tools/list"},
         )
-        assert res_query.status_code != 401
+        assert res_query.status_code == 401

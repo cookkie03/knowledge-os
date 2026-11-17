@@ -40,12 +40,11 @@ if str(ROOT / "mcp") not in sys.path:
     sys.path.insert(0, str(ROOT / "mcp"))
 
 import kb_router
-from kb_router import (
-    KBRouter,
+from kb_router import KBRouter, build_mcp_server
+from tools.retrieval import (
     STRATEGY_TO_MODE,
-    _normalize_context,
-    _normalize_strategy,
-    build_mcp_server,
+    normalize_context as _normalize_context,
+    normalize_strategy as _normalize_strategy,
 )
 from storage.catalog import Catalog, generate_canonical_doc_id
 

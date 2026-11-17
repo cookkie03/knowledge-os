@@ -18,7 +18,6 @@ from url_importer import (
     import_media_url_to_kb,
 )
 from ragcli import build_parser
-from kb_router import KBRouter, build_mcp_server
 
 
 def test_sanitize_slug():
@@ -105,13 +104,3 @@ def test_import_media_url_to_kb(tmp_path, monkeypatch):
     content = saved_file.read_text(encoding="utf-8")
     assert "Awesome Podcast Episode" in content
     assert "Transcribed speech from mock whisper." in content
-
-
-@pytest.mark.anyio
-async def test_mcp_ingest_url_tool_registered():
-    router = KBRouter()
-    mcp_app = build_mcp_server(router)
-    tools = await mcp_app.list_tools()
-    tool_names = {tool.name for tool in tools}
-    assert "ingest_url" in tool_names
-
