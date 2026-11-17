@@ -47,6 +47,9 @@ def list_source_files(root, exclude_patterns=None):
     else:
         try:
             files = _walk_list_files(root_real)
+            # Not a git work tree: the only rule applied is the folder's own .gitignore,
+            # if it has one. Without it, everything is loaded as is.
+            files = _apply_excludes(files, _gitignore_patterns(root_real))
         except OSError as exc:
             # A walk that hits an OSError may have partially listed the
             # tree; mark it incomplete so callers never trust a partial result.
@@ -167,6 +170,24 @@ def _walk_list_files(root):
             rel = os.path.relpath(abs_path, root)
             files.append(rel.replace(os.sep, "/"))
     return files
+
+
+# Read the root .gitignore of a non-git folder as plain exclude patterns.
+# Only simple rules are supported (names, globs, trailing-slash folders); comments,
+# blank lines and negations ("!") are skipped, and a missing or unreadable file means no rules.
+def _gitignore_patterns(root):
+    path = os.path.join(root, ".gitignore")
+    patterns = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("!"):
+                    continue
+                patterns.append(line.lstrip("/"))
+    except OSError:
+        return []
+    return patterns
 
 
 def _apply_excludes(files, patterns):

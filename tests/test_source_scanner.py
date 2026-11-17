@@ -177,3 +177,22 @@ def test_directory_pattern_with_trailing_slash_excludes_folder():
     from pipeline.source_scanner import _apply_excludes
     files = ["brokers/key.py", "src/brokers/x.py", "brokers", "docs/a.md"]
     assert _apply_excludes(files, ["brokers/"]) == ["brokers", "docs/a.md"]
+
+
+# A folder that is not a git work tree follows its own .gitignore, and nothing else.
+def test_non_git_folder_follows_its_gitignore(tmp_path):
+    from pipeline.source_scanner import list_source_files
+    (tmp_path / "keep.md").write_text("a")
+    (tmp_path / "secret.env").write_text("b")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "out.txt").write_text("c")
+    (tmp_path / ".gitignore").write_text("# c\n*.env\nbuild/\n")
+    files = list_source_files(str(tmp_path))["files"]
+    assert files == [".gitignore", "keep.md"]
+
+
+def test_non_git_folder_without_gitignore_loads_everything(tmp_path):
+    from pipeline.source_scanner import list_source_files
+    (tmp_path / "a.md").write_text("a")
+    (tmp_path / "b.env").write_text("b")
+    assert list_source_files(str(tmp_path))["files"] == ["a.md", "b.env"]
