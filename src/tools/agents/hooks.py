@@ -7,23 +7,12 @@ with client hook configuration management (.claude/settings.json, etc.).
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
-import re
-import sys
 from pathlib import Path
 from typing import Any
 
-# ROOT is the repository root: src/cli/agent_hooks.py -> src/cli -> src -> repo.
-ROOT = Path(__file__).resolve().parent.parent.parent
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
-if str(ROOT / "src" / "cli") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src" / "cli"))
-
-from tools.kb import find_kb, load_registry  # noqa: E402
-from tools.memory import query_memories, remember_memory  # noqa: E402
+from tools.kb import find_kb, load_registry
+from tools.memory import query_memories, remember_memory
 
 
 # Query KB active memories matching the prompt and format an injection context block.
@@ -262,62 +251,3 @@ def install_client_hook(
         "status": "error",
         "message": f"Unsupported client: {client}. Currently supported: claude-code, cursor, codex, antigravity",
     }
-
-
-# Parse CLI arguments and dispatch memory hook actions (inject, capture, install).
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Agent Hooks for Memory Injection and Capture")
-    subparsers = parser.add_subparsers(dest="action")
-
-    # inject
-    inj_parser = subparsers.add_parser("inject")
-    inj_parser.add_argument("--kb", default="agent-memory", help="Target knowledge base")
-    inj_parser.add_argument("--prompt", default="", help="User prompt to match against memories")
-
-    # capture
-    cap_parser = subparsers.add_parser("capture")
-    cap_parser.add_argument("--kb", default="agent-memory", help="Target knowledge base")
-    cap_parser.add_argument("--transcript", default=None, help="Path to transcript file")
-    cap_parser.add_argument("--text", default=None, help="Raw transcript text")
-    cap_parser.add_argument("--session-id", default=None, help="Session identifier")
-
-    # install
-    inst_parser = subparsers.add_parser("install")
-    inst_parser.add_argument("--client", default="claude-code", choices=["claude-code", "cursor", "codex", "antigravity"])
-    inst_parser.add_argument("--kb", default="agent-memory")
-    inst_parser.add_argument("--project-dir", default=None)
-
-    args = parser.parse_args()
-
-    if args.action == "inject":
-        # Read from argument or stdin if piped
-        prompt = args.prompt
-        if not prompt and not sys.stdin.isatty():
-            prompt = sys.stdin.read()
-        res = inject_pre_prompt_context(args.kb, prompt)
-        if res:
-            print(res)
-    elif args.action == "capture":
-        text = args.text
-        if not text and not args.transcript and not sys.stdin.isatty():
-            text = sys.stdin.read()
-        res = capture_post_session(
-            kb_name=args.kb,
-            transcript_path=args.transcript,
-            raw_text=text,
-            session_id=args.session_id,
-        )
-        print(json.dumps(res, indent=2))
-    elif args.action == "install":
-        res = install_client_hook(
-            client=args.client,
-            kb_name=args.kb,
-            target_project_dir=args.project_dir,
-        )
-        print(json.dumps(res, indent=2))
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()

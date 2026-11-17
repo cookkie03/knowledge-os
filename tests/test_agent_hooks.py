@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from agent_hooks import (
+from tools.agents.hooks import (
     capture_post_session,
     inject_pre_prompt_context,
     install_client_hook,
@@ -37,7 +37,7 @@ def test_inject_pre_prompt_context():
             ]
         }
 
-        with patch("agent_hooks.load_registry", return_value=mock_reg):
+        with patch("tools.agents.hooks.load_registry", return_value=mock_reg):
             # Test match
             res = inject_pre_prompt_context("agent-memory", "quale porta usa Tailscale?")
             assert '<project_memory kb="agent-memory">' in res
@@ -57,7 +57,7 @@ def test_capture_post_session():
             ]
         }
 
-        with patch("agent_hooks.load_registry", return_value=mock_reg):
+        with patch("tools.agents.hooks.load_registry", return_value=mock_reg):
             res = capture_post_session(
                 kb_name="agent-memory",
                 raw_text="Abbiamo completato l'integrazione di FastMCP con remember tool.",
@@ -141,7 +141,7 @@ def test_install_client_hook_antigravity():
 
 
 def test_mcp_cursor_add_and_remove():
-    from mcp_clients import CLIENTS, REMOVERS, add_cursor, remove_cursor
+    from tools.agents.clients import CLIENTS, REMOVERS, add_cursor, remove_cursor
 
     assert "cursor" in CLIENTS
     assert "cursor" in REMOVERS

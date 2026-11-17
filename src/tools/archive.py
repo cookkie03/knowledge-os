@@ -17,7 +17,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from pipeline.json_parser import conversation_to_markdown, detect_and_parse_json
 

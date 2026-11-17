@@ -5,7 +5,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from archive_importer import (
+from tools.archive import (
     ArchiveSecurityError,
     detect_and_parse_json,
     extract_user_preferences,

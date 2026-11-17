@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+from typing import Any
 import time
 from pathlib import Path
 
@@ -24,11 +25,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised via monkeypatch in tests
     requests = None
 
-import mcp_clients
+from tools.agents import clients as mcp_clients
 from tools.kb import add_kb, set_data_location, canonicalize_exclude_specs, ensure_kb_dirs, expand_exclude_specs, find_kb, load_registry, merged_runtime_env, normalize_exclude_specs_for_kb, split_exclude_specs, save_registry, storage_mode, write_kb_env
-from tools.system import INGEST_SCRIPT, MCP_SCRIPT, KB_ROOT, global_env, upsert_global_env
-from archive_importer import import_archive_to_kb
-from agent_hooks import (
+from tools.system import MCP_SCRIPT, KB_ROOT, global_env, upsert_global_env
+from tools.archive import import_archive_to_kb
+from tools.agents.hooks import (
     capture_post_session,
     inject_pre_prompt_context,
     install_client_hook,
@@ -40,13 +41,7 @@ from tools.memory import (
     remember_memory,
     run_dreaming_cycle,
 )
-from storage.inbox import (
-    get_inbox_dirs,
-    get_inbox_status,
-    load_inbox_jobs,
-    queue_inbox_send,
-    spawn_detached_job,
-)
+from tools import ingest as ingest_tools
 
 LINUX_SYSTEMD_UNITS = (
     "lightrag-server@.service",
@@ -649,263 +644,111 @@ def cmd_remove(args: argparse.Namespace) -> None:
             print(f"  - {warning}")
 
 
+# Print a result either as JSON (--json) or through a text renderer.
+def _emit(args: argparse.Namespace, data: dict, render=None) -> None:
+    if getattr(args, "json", False) or render is None:
+        print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+        return
+    render(data)
+
+
+# Start (default) or run in the foreground (--wait) one ingestion pass: folder
+# sources plus inbox, through the single worker in tools.ingest.
 def cmd_ingest(args: argparse.Namespace) -> None:
-    env = global_env()
-    registry = load_registry(env)
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' not found.")
-    engine_python, _ = _ensure_runtime(env)
-    state = _kb_server_state(kb)
-    if state == "down":
-        sys.exit(
-            f"Server '{args.name}' is not active. Start it first with `ragcli start {args.name}`."
-        )
-    if state == "zombie":
-        sys.exit(
-            f"Server '{args.name}' is not healthy on :{kb['port']}. "
-            f"Run `ragcli stop {args.name}`, then `ragcli start {args.name}`, and retry."
-        )
-    write_kb_env(kb, env)
-    cmd = [str(engine_python), "-u", str(INGEST_SCRIPT), "--kb", args.name]
-    if args.force:
-        cmd.append("--force")
-    if getattr(args, "pipelines", None):
-        cmd.extend(["--pipelines", args.pipelines])
-    for cat in ("text", "pdf", "images", "office", "audio"):
-        if getattr(args, f"no_{cat}", False):
-            cmd.append(f"--no-{cat}")
-    if getattr(args, "source_folder", None):
-        cmd.extend(["--source-folder", args.source_folder])
-
-    if getattr(args, "foreground", False) or getattr(args, "wait", False):
-        sys.exit(subprocess.call(cmd, env=merged_runtime_env(kb, env)))
-    log_path = Path(kb["data_dir"]) / "ingest.log"
-    pid = spawn_detached_job(cmd, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
-    print(f"Ingest avviato in background per '{args.name}' (PID: {pid}).")
-    print(f"Log: {log_path}")
-    print(f"Per monitorare: tail -f {log_path}")
+    if not getattr(args, "wait", False):
+        started = ingest_tools.start_background(args.name)
+        _emit(args, started, lambda d: print(f"Ingestion started for '{d['kb']}' (PID {d['pid']}). Log: {d['log']}"))
+        return
+    report = ingest_tools.run(args.name, source_ids=args.source or None,
+                              include_inbox=not args.no_inbox, lock_timeout=300.0)
+    _emit(args, report)
+    if report["status"] != "ok":
+        raise SystemExit(1)
 
 
-# Inbox management commands (send, consume, status)
+# Queue a file or directory in the inbox and, unless --no-start is given, start the worker.
 def cmd_inbox_send(args: argparse.Namespace) -> None:
-    env = global_env()
-    registry = load_registry(env)
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    source_path = Path(args.path).expanduser().resolve()
-    if not source_path.exists():
-        sys.exit(f"Percorso sorgente inesistente: {args.path}")
-
-    job = queue_inbox_send(kb, source_path=source_path)
-    print(f"File accodati per '{args.name}' [job: {job['job_id']}].")
-    print(f"File accettati: {job.get('file_count', 1)}")
-
-    if kb.get("link", {}).get("consume", True):
-        engine_python, _ = _ensure_runtime(env)
-        ragcli_script = ROOT / "src" / "cli" / "ragcli.py"
-        log_path = Path(kb["data_dir"]) / "inbox.log"
-        worker_cmd = [str(engine_python), str(ragcli_script), "_worker_run", args.name]
-        spawn_detached_job(worker_cmd, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
-        print("Elaborazione automatica avviata in background.")
-    print(f"Stato: ragcli inbox status {args.name}")
+    job = ingest_tools.inbox_add(args.name, path=str(Path(args.path).expanduser().resolve()))
+    result = {"job": job}
+    if not args.no_start:
+        result["worker"] = ingest_tools.start_background(args.name)
+    _emit(args, result, lambda d: print(f"Queued {d['job'].get('file_count', 1)} file(s) in job {d['job']['job_id']}."))
 
 
+# Start the single worker so pending inbox batches are processed.
 def cmd_inbox_consume(args: argparse.Namespace) -> None:
-    env = global_env()
-    registry = load_registry(env)
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    if _kb_server_state(kb) == "down":
-        sys.exit(f"Il server di '{args.name}' non è attivo. Avvialo prima con `ragcli start {args.name}`.")
-
-    engine_python, _ = _ensure_runtime(env)
-    ragcli_script = ROOT / "src" / "cli" / "ragcli.py"
-    log_path = Path(kb["data_dir"]) / "inbox.log"
-    worker_cmd = [str(engine_python), str(ragcli_script), "_worker_run", args.name]
-    pid = spawn_detached_job(worker_cmd, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
-    print(f"Consumo inbox avviato in background per '{args.name}' (PID: {pid}).")
-    print(f"Log: {log_path}")
-    print(f"Stato: ragcli inbox status {args.name}")
+    started = ingest_tools.start_background(args.name)
+    _emit(args, started, lambda d: print(f"Worker started for '{d['kb']}' (PID {d['pid']}). Log: {d['log']}"))
 
 
+# Show inbox queue counts.
 def cmd_inbox_status(args: argparse.Namespace) -> None:
-    registry = load_registry(global_env())
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    status = get_inbox_status(kb)
-    if getattr(args, "json", False):
-        print(json.dumps(status, indent=2, ensure_ascii=False))
-        return
-    print(f"\nStato Inbox per '{args.name}':")
-    print(f"  Pending    (in attesa)     : {status['pending']}")
-    print(f"  Processing (in lavorazione): {status['processing']}")
-    print(f"  Processed  (completati)    : {status['processed']}")
-    print(f"  Failed     (falliti)       : {status['failed']}")
-    print(f"  Totale batch               : {status['total']}\n")
+    def render(status: dict) -> None:
+        print(f"Inbox '{args.name}': pending {status['pending']}, processing {status['processing']}, "
+              f"processed {status['processed']}, failed {status['failed']} (total {status['total']})")
+    _emit(args, ingest_tools.inbox_status(args.name), render)
 
 
-# Source management commands (add, remove, list, ingest)
+# Register an extra source folder of the KB in the Catalog.
 def cmd_source_add(args: argparse.Namespace) -> None:
-    env = global_env()
-    registry = load_registry(env)
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    path = Path(args.path).expanduser().resolve()
-    if not path.is_dir():
-        sys.exit(f"Percorso non valido o non è una cartella: {args.path}")
-    sources = kb.setdefault("sources", [])
-    path_str = str(path)
-    if path_str in sources:
-        print(f"Sorgente '{path_str}' già collegata a '{args.name}'.")
-        return
-    sources.append(path_str)
-    save_registry(registry)
-    print(f"Sorgente '{path_str}' aggiunta a '{args.name}'.")
+    source = ingest_tools.add_source(args.name, args.path, name=getattr(args, "label", None))
+    _emit(args, source, lambda d: print(f"Source '{d['id']}' added: {d['path']}"))
 
 
+# Detach a source from the KB by its id.
 def cmd_source_rm(args: argparse.Namespace) -> None:
-    env = global_env()
-    registry = load_registry(env)
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    path = Path(args.path).expanduser().resolve()
-    path_str = str(path)
-    sources = kb.get("sources", [])
-    if path_str not in sources:
-        sys.exit(f"Sorgente '{path_str}' non trovata in '{args.name}'.")
-    sources.remove(path_str)
-    save_registry(registry)
-    print(f"Sorgente '{path_str}' rimossa da '{args.name}'.")
+    result = ingest_tools.remove_source(args.name, args.source_id)
+    _emit(args, result, lambda d: print(f"Source '{d['removed']}' removed ({d['files_detached']} files detached)."))
 
 
+# List the sources of a KB with their active file counts.
 def cmd_source_ls(args: argparse.Namespace) -> None:
-    registry = load_registry(global_env())
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    sources = kb.get("sources", [])
-    if not sources:
-        print(f"Nessuna sorgente esterna collegata a '{args.name}'.")
-        print(f"Per aggiungerne una: ragcli source add {args.name} <cartella>")
-        return
-    print(f"\nSorgenti collegate a '{args.name}':")
-    for s in sources:
-        p = Path(s)
-        status_tag = "OK" if p.is_dir() else "NON RAGGIUNGIBILE"
-        print(f"  - [{status_tag}] {s}")
-    print()
+    def render(data: dict) -> None:
+        for source in data["sources"]:
+            print(f"{source['id']:<22}{source['type']:<9}{source['active_files']:>6}  {source.get('path') or ''}")
+    _emit(args, ingest_tools.list_sources(args.name), render)
 
 
+# Ingest only the given sources (ids), in the foreground.
 def cmd_source_ingest(args: argparse.Namespace) -> None:
-    env = global_env()
-    registry = load_registry(env)
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    if _kb_server_state(kb) == "down":
-        sys.exit(f"Server '{args.name}' non attivo. Avvialo prima con `ragcli start {args.name}`.")
-
-    all_sources = kb.get("sources", [])
-    target_sources = []
-    if getattr(args, "sources", None):
-        for s in args.sources:
-            p_str = str(Path(s).expanduser().resolve())
-            if p_str not in all_sources:
-                sys.exit(f"Sorgente '{p_str}' non è tra le sorgenti collegate di '{args.name}'. Aggiungila prima con `ragcli source add`.")
-            target_sources.append(p_str)
-    else:
-        target_sources = list(all_sources)
-
-    if not target_sources:
-        sys.exit(f"Nessuna sorgente collegata da sincronizzare per '{args.name}'. Aggiungi una sorgente con: ragcli source add {args.name} <cartella>")
-
-    engine_python, _ = _ensure_runtime(env)
-    log_path = Path(kb["data_dir"]) / "ingest.log"
-
-    for src in target_sources:
-        cmd = [str(engine_python), str(INGEST_SCRIPT), "--kb", args.name, "--source-folder", src]
-        if getattr(args, "force", False):
-            cmd.append("--force")
-        spawn_detached_job(cmd, kb["data_dir"], log_path, env=merged_runtime_env(kb, env))
-
-    print(f"Ingest di {len(target_sources)} sorgenti avviato in background per '{args.name}'.")
-    print(f"Log: {log_path}")
+    report = ingest_tools.run(args.name, source_ids=args.source_ids, include_inbox=False, lock_timeout=300.0)
+    _emit(args, report)
+    if report["status"] != "ok":
+        raise SystemExit(1)
 
 
-# Link automation commands (on, off, status)
-def cmd_link_on(args: argparse.Namespace) -> None:
-    env = global_env()
-    registry = load_registry(env)
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    link = kb.setdefault("link", {"consume": True, "ingest": True})
-    if getattr(args, "consume", False):
-        link["consume"] = True
-    if getattr(args, "ingest", False):
-        link["ingest"] = True
-    if not getattr(args, "consume", False) and not getattr(args, "ingest", False):
-        link["consume"] = True
-        link["ingest"] = True
-    save_registry(registry)
-    print(f"Link ON per '{args.name}' -> consume: {link['consume']}, ingest: {link['ingest']}")
-
-
-def cmd_link_off(args: argparse.Namespace) -> None:
-    env = global_env()
-    registry = load_registry(env)
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    link = kb.setdefault("link", {"consume": True, "ingest": True})
-    if getattr(args, "consume", False):
-        link["consume"] = False
-    if getattr(args, "ingest", False):
-        link["ingest"] = False
-    if not getattr(args, "consume", False) and not getattr(args, "ingest", False):
-        link["consume"] = False
-        link["ingest"] = False
-    save_registry(registry)
-    print(f"Link OFF per '{args.name}' -> consume: {link['consume']}, ingest: {link['ingest']}")
-
-
-def cmd_link_status(args: argparse.Namespace) -> None:
-    registry = load_registry(global_env())
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    link = kb.get("link", {"consume": True, "ingest": True})
-    sources = kb.get("sources", [])
-    inbox_st = get_inbox_status(kb)
-
-    print(f"\nStato Link per '{args.name}':")
-    print(f"  Consume automatico : {'ON' if link.get('consume') else 'OFF'}")
-    print(f"  Ingest automatico  : {'ON' if link.get('ingest') else 'OFF'}")
-    print(f"  Sorgenti collegate : {len(sources)}")
-    print(f"  Inbox pending      : {inbox_st['pending']} batch in attesa\n")
-
-
-# Background entry point: run one ingestion pass (folder sources plus inbox) through
-# the single worker. The lock timeout lets two workers spawned back to back queue up
-# instead of one silently giving up while the other has already listed the inbox.
+# Background entry point used by detached workers; prints the report and fails on a non-ok status.
 def cmd_worker_run(args: argparse.Namespace) -> None:
-    from pipeline.orchestrator import run_kb
-
-    env = global_env()
-    registry = load_registry(env)
-    kb = find_kb(registry, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    report = run_kb(kb, merged_runtime_env(kb, env), kb_root=KB_ROOT, lock_timeout=300.0)
+    report = ingest_tools.run(args.name, lock_timeout=300.0)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     if report["status"] != "ok":
-        sys.exit(f"Ingestion not run for '{args.name}': {report['status']}")
+        raise SystemExit(f"Ingestion not run for '{args.name}': {report['status']}")
+
+
+# Job commands: status, wait (poll until a final stage), list, retry.
+FINAL_JOB_STAGES = {"COMPLETED", "FAILED_RETRYABLE", "FAILED_FINAL", "NEEDS_REVIEW"}
+
+
+def cmd_job(args: argparse.Namespace) -> None:
+    if args.job_cmd == "list":
+        data = ingest_tools.list_jobs(args.kb, stage=args.stage, limit=args.limit)
+        def render(d: dict) -> None:
+            for job in d["jobs"]:
+                print(f"{job['job_id']:<34}{job['stage']:<18}{job['source_id'] or '-'}")
+        _emit(args, data, render)
+        return
+    if args.job_cmd == "retry":
+        _emit(args, ingest_tools.retry_job(args.kb, args.job_id, lock_timeout=300.0))
+        return
+    job = ingest_tools.get_job(args.kb, args.job_id)
+    while args.job_cmd == "wait" and job["stage"] not in FINAL_JOB_STAGES:
+        time.sleep(1)
+        job = ingest_tools.get_job(args.kb, args.job_id)
+    ok = args.job_cmd != "wait" or job["stage"] == "COMPLETED"
+    _emit(args, {"ok": ok, "job_id": job["job_id"], "kb": job["kb_id"], "source": job["source_id"],
+                 "state": job["stage"], **job["counters"]})
+    if not ok:
+        raise SystemExit(1)
 
 
 def cmd_move(args: argparse.Namespace) -> None:
@@ -970,47 +813,6 @@ def cmd_mcp_rm(args: argparse.Namespace) -> None:
             print(f"Errore durante la de-registrazione da {client}: {exc}")
             rc = 1
     sys.exit(rc)
-
-
-def cmd_sync_prepare(args: argparse.Namespace) -> None:
-    """Create a source-bound sync job and return its comparison snapshot."""
-    from storage.catalog import Catalog
-    from sync.server import prepare_sync
-    import uuid
-
-    try:
-        if not find_kb(load_registry(global_env()), args.kb):
-            raise ValueError(f"KB '{args.kb}' not found")
-        with Catalog.open_for_kb(args.kb, KB_ROOT) as catalog:
-            result = prepare_sync(catalog, args.kb, args.source, args.mode, uuid.uuid4().hex)
-    except (ValueError, OSError, RuntimeError) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
-        raise SystemExit(1) from exc
-    print(json.dumps({"ok": True, **result}, ensure_ascii=False))
-
-
-def cmd_job_status(args: argparse.Namespace) -> None:
-    """Return the durable state of a job belonging to the requested KB."""
-    from storage.catalog import Catalog
-
-    try:
-        if not find_kb(load_registry(global_env()), args.kb):
-            raise ValueError("unknown KB")
-        with Catalog.open_for_kb(args.kb, KB_ROOT) as catalog:
-            while True:
-                job = catalog.get_job(args.job_id)
-                if not job or job["kb_id"] != args.kb:
-                    raise ValueError("unknown job")
-                if args.job_cmd != "wait" or job["stage"] in {"COMPLETED", "FAILED_RETRYABLE", "FAILED_FINAL", "NEEDS_REVIEW"}:
-                    break
-                time.sleep(1)
-        ok = args.job_cmd != "wait" or job["stage"] == "COMPLETED"
-        print(json.dumps({"ok": ok, "job_id": job["job_id"], "kb": job["kb_id"], "source": job["source_id"], "state": job["stage"], **job["counters"]}, ensure_ascii=False))
-        if not ok:
-            raise SystemExit(1)
-    except (ValueError, OSError, RuntimeError) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
-        raise SystemExit(1) from exc
 
 
 def cmd_memory_remember(args: argparse.Namespace) -> None:
@@ -1442,23 +1244,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sync = sub.add_parser("sync", help="remote sync management")
-    sync_sub = sync.add_subparsers(dest="sync_cmd", required=True)
-    prepare = sync_sub.add_parser("prepare", help="prepare a sync job")
-    prepare.add_argument("--kb", required=True)
-    prepare.add_argument("--source", required=True)
-    prepare.add_argument("--mode", choices=("full", "partial"), required=True)
-    prepare.add_argument("--json", action="store_true")
-    prepare.set_defaults(func=cmd_sync_prepare)
-
-    job = sub.add_parser("job", help="job status")
+    job = sub.add_parser("job", help="ingestion jobs")
     job_sub = job.add_subparsers(dest="job_cmd", required=True)
-    for name in ("status", "wait"):
-        status = job_sub.add_parser(name)
-        status.add_argument("job_id")
-        status.add_argument("--kb", required=True)
-        status.add_argument("--json", action="store_true")
-        status.set_defaults(func=cmd_job_status)
+    for name in ("status", "wait", "retry"):
+        job_cmd = job_sub.add_parser(name)
+        job_cmd.add_argument("job_id")
+        job_cmd.add_argument("--kb", required=True)
+        job_cmd.add_argument("--json", action="store_true")
+        job_cmd.set_defaults(func=cmd_job)
+    job_list = job_sub.add_parser("list")
+    job_list.add_argument("--kb", required=True)
+    job_list.add_argument("--stage")
+    job_list.add_argument("--limit", type=int, default=50)
+    job_list.add_argument("--json", action="store_true")
+    job_list.set_defaults(func=cmd_job)
 
     doctor = sub.add_parser("doctor", help="verify runtime, config, services, and publishing")
     doctor.set_defaults(func=cmd_doctor)
@@ -1472,67 +1271,53 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd = sub.add_parser("list", help="list registered KBs")
     list_cmd.set_defaults(func=cmd_list)
 
-    ingest = sub.add_parser("ingest", help="incrementally sync the source to an existing KB")
+    ingest = sub.add_parser("ingest", help="run one ingestion pass (folder sources and inbox)")
     ingest.add_argument("name")
-    ingest.add_argument("--force", action="store_true", help="regenerate derived artifacts and forcibly realign the KB")
-    ingest.add_argument("--pipelines", help="comma-separated enabled pipeline categories (text,pdf,images,office,audio)")
-    ingest.add_argument("--no-text", action="store_true", help="disable the pipeline for text/code files")
-    ingest.add_argument("--no-pdf", action="store_true", help="disable the pipeline for PDF documents")
-    ingest.add_argument("--no-images", action="store_true", help="disable the image pipeline")
-    ingest.add_argument("--no-office", action="store_true", help="disable the Office/ODF/EPUB pipeline")
-    ingest.add_argument("--no-audio", action="store_true", help="disable the audio/video pipeline")
-    ingest.add_argument("--source-folder", help="ingest a registered external source path")
-    ingest.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
+    ingest.add_argument("--wait", action="store_true", help="run in the foreground and print the report")
+    ingest.add_argument("--source", action="append", help="limit the pass to a source id (repeatable, with --wait)")
+    ingest.add_argument("--no-inbox", action="store_true", help="skip the inbox (with --wait)")
+    ingest.add_argument("--json", action="store_true")
     ingest.set_defaults(func=cmd_ingest)
 
     inbox = sub.add_parser("inbox", help="append-only inbox management")
     inbox_sub = inbox.add_subparsers(dest="inbox_cmd", required=True)
-    inbox_send = inbox_sub.add_parser("send", help="queue a file or directory")
+    inbox_send = inbox_sub.add_parser("send", help="queue a file, a ZIP or a directory")
     inbox_send.add_argument("name")
     inbox_send.add_argument("path")
+    inbox_send.add_argument("--no-start", action="store_true", help="queue only, do not start the worker")
+    inbox_send.add_argument("--json", action="store_true")
     inbox_send.set_defaults(func=cmd_inbox_send)
-    inbox_consume = inbox_sub.add_parser("consume", help="process pending inbox batches in background")
+    inbox_consume = inbox_sub.add_parser("consume", help="start the worker for pending batches")
     inbox_consume.add_argument("name")
+    inbox_consume.add_argument("--json", action="store_true")
     inbox_consume.set_defaults(func=cmd_inbox_consume)
     inbox_status = inbox_sub.add_parser("status", help="show inbox queue status")
     inbox_status.add_argument("name")
     inbox_status.add_argument("--json", action="store_true")
     inbox_status.set_defaults(func=cmd_inbox_status)
 
-    source = sub.add_parser("source", help="manage external source folders")
+    source = sub.add_parser("source", help="manage source folders of a KB")
     source_sub = source.add_subparsers(dest="source_cmd", required=True)
-    source_add = source_sub.add_parser("add", help="register an external folder")
+    source_add = source_sub.add_parser("add", help="register a source folder")
     source_add.add_argument("name")
     source_add.add_argument("path")
+    source_add.add_argument("--label", help="display name of the source")
+    source_add.add_argument("--json", action="store_true")
     source_add.set_defaults(func=cmd_source_add)
-    source_rm = source_sub.add_parser("remove", aliases=["rm"], help="unregister an external folder")
+    source_rm = source_sub.add_parser("remove", aliases=["rm"], help="detach a source by id")
     source_rm.add_argument("name")
-    source_rm.add_argument("path")
+    source_rm.add_argument("source_id")
+    source_rm.add_argument("--json", action="store_true")
     source_rm.set_defaults(func=cmd_source_rm)
-    source_ls = source_sub.add_parser("list", aliases=["ls"], help="list registered folders")
+    source_ls = source_sub.add_parser("list", aliases=["ls"], help="list sources with file counts")
     source_ls.add_argument("name")
+    source_ls.add_argument("--json", action="store_true")
     source_ls.set_defaults(func=cmd_source_ls)
-    source_ingest = source_sub.add_parser("ingest", help="ingest registered folders in background")
+    source_ingest = source_sub.add_parser("ingest", help="ingest only the given source ids, in the foreground")
     source_ingest.add_argument("name")
-    source_ingest.add_argument("--sources", nargs="+")
-    source_ingest.add_argument("--force", action="store_true")
+    source_ingest.add_argument("source_ids", nargs="+")
+    source_ingest.add_argument("--json", action="store_true")
     source_ingest.set_defaults(func=cmd_source_ingest)
-
-    link = sub.add_parser("link", help="control persistent automation")
-    link_sub = link.add_subparsers(dest="link_cmd", required=True)
-    link_on = link_sub.add_parser("on", help="enable consume and/or ingest automation")
-    link_on.add_argument("name")
-    link_on.add_argument("--consume", action="store_true")
-    link_on.add_argument("--ingest", action="store_true")
-    link_on.set_defaults(func=cmd_link_on)
-    link_off = link_sub.add_parser("off", help="disable consume and/or ingest automation")
-    link_off.add_argument("name")
-    link_off.add_argument("--consume", action="store_true")
-    link_off.add_argument("--ingest", action="store_true")
-    link_off.set_defaults(func=cmd_link_off)
-    link_status = link_sub.add_parser("status", help="show automation status")
-    link_status.add_argument("name")
-    link_status.set_defaults(func=cmd_link_status)
 
     worker = sub.add_parser("_worker_run", help=argparse.SUPPRESS)
     worker.add_argument("name")
@@ -1796,7 +1581,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    args.func(args)
+    # User errors (unknown KB, bad path, busy lock) are raised as ValueError by tools.*
+    # and shown as one line: a traceback would hide the message from the user.
+    try:
+        args.func(args)
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}")
 
 
 if __name__ == "__main__":
