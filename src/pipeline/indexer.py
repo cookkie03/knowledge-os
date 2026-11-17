@@ -190,12 +190,18 @@ class LightRAGClient:
         host: str = "127.0.0.1",
         session: requests.Session | None = None,
         timeout: float = 60.0,
+        process_timeout: float | None = None,
     ) -> None:
         self.port = port
         self.host = host
         self.base_url = f"http://{host}:{port}"
         self.session = session or requests.Session()
         self.timeout = timeout
+        # Seconds to wait for LightRAG to finish one document. A local LLM needs minutes per
+        # document, so this is configurable (INGEST_PROCESS_TIMEOUT) instead of a fixed 60 s.
+        if process_timeout is None:
+            process_timeout = float(os.environ.get("INGEST_PROCESS_TIMEOUT", "1800"))
+        self.process_timeout = process_timeout
 
     def health(self, timeout: float = 3.0) -> bool:
         """Check whether LightRAG backend is healthy."""
@@ -435,7 +441,7 @@ class LightRAGClient:
         self,
         file_source: str,
         doc_id: str | None = None,
-        timeout: float = 60.0,
+        timeout: float | None = None,
         poll_interval: float = 0.5,
     ) -> dict[str, Any]:
         """Poll LightRAG until document reaches verified PROCESSED status (§5, §11).
@@ -444,6 +450,8 @@ class LightRAGClient:
             DocumentIndexingFailedError: If document status becomes FAILED.
             DocumentIndexingTimeoutError: If timeout expires before PROCESSED.
         """
+        if timeout is None:
+            timeout = self.process_timeout
         deadline = time.time() + timeout
         while time.time() < deadline:
             doc = self.find_document_by_file_source(file_source)

@@ -189,9 +189,18 @@ def _apply_excludes(files, patterns):
 def _matches_any(rel, patterns):
     """Return True if rel matches any pattern by path or component."""
     for pattern in patterns:
+        components = rel.split("/")
+        # A trailing slash means "directory": it matches any parent folder of the
+        # file, never the file name itself. Without this, "brokers/" would exclude
+        # nothing, because no path component ever contains a slash.
+        if pattern.endswith("/"):
+            directory = pattern.rstrip("/")
+            for component in components[:-1]:
+                if fnmatch.fnmatch(component, directory):
+                    return True
+            continue
         if fnmatch.fnmatch(rel, pattern):
             return True
-        components = rel.split("/")
         for component in components:
             if fnmatch.fnmatch(component, pattern):
                 return True

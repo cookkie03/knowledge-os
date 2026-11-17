@@ -171,3 +171,9 @@ def test_deleted_tracked_file_is_skipped_not_error(tmp_path):
     assert result["complete"] is True
     assert result["errors"] == []
     assert result["files"] == []
+
+# A trailing slash excludes a directory at any depth but not a file of the same name.
+def test_directory_pattern_with_trailing_slash_excludes_folder():
+    from pipeline.source_scanner import _apply_excludes
+    files = ["brokers/key.py", "src/brokers/x.py", "brokers", "docs/a.md"]
+    assert _apply_excludes(files, ["brokers/"]) == ["brokers", "docs/a.md"]
