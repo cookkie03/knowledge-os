@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from ragcli import build_parser
-from pipeline.dreaming import remember_memory
+from tools.memory import remember_memory
 
 
 def test_retrieve_hierarchical_parser_has_memory_and_url():

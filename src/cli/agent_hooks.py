@@ -23,7 +23,7 @@ if str(ROOT / "src" / "cli") not in sys.path:
     sys.path.insert(0, str(ROOT / "src" / "cli"))
 
 from tools.kb import find_kb, load_registry  # noqa: E402
-from pipeline.dreaming import query_memories, remember_memory  # noqa: E402
+from tools.memory import query_memories, remember_memory  # noqa: E402
 
 
 # Query KB active memories matching the prompt and format an injection context block.
@@ -51,12 +51,12 @@ def inject_pre_prompt_context(kb_name: str, prompt: str, max_items: int = 5) -> 
     combined = []
     seen_ids = set()
     for m in prefs:
-        if m.id not in seen_ids:
-            seen_ids.add(m.id)
+        if m["id"] not in seen_ids:
+            seen_ids.add(m["id"])
             combined.append(m)
     for m in matched:
-        if m.id not in seen_ids:
-            seen_ids.add(m.id)
+        if m["id"] not in seen_ids:
+            seen_ids.add(m["id"])
             combined.append(m)
 
     if not combined:
@@ -64,10 +64,10 @@ def inject_pre_prompt_context(kb_name: str, prompt: str, max_items: int = 5) -> 
 
     lines = [f'<project_memory kb="{kb_name}">']
     for m in combined:
-        mtype = m.type.upper()
+        mtype = m["type"].upper()
         # Clean one-line summary
-        content_preview = m.content.strip().splitlines()[0][:140]
-        title_str = f" ({m.title})" if m.title and m.title not in content_preview else ""
+        content_preview = m["content"].strip().splitlines()[0][:140]
+        title_str = f" ({m["title"]})" if m["title"] and m["title"] not in content_preview else ""
         lines.append(f"- [{mtype}]{title_str}: {content_preview}")
     lines.append("</project_memory>")
 
@@ -120,8 +120,8 @@ def capture_post_session(
 
     return {
         "status": "ok",
-        "memory_id": mem.id,
-        "title": mem.title,
+        "memory_id": mem["id"],
+        "title": mem["title"],
     }
 
 

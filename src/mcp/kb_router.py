@@ -45,7 +45,7 @@ if str(ROOT / "src" / "cli") not in sys.path:
 from tools.kb import find_kb, load_registry, storage_mode  # noqa: E402
 
 from tools.system import global_env  # noqa: E402
-from mcp.memories import (  # noqa: E402
+from tools.memory import (  # noqa: E402
     deprecate_memory_by_id,
     query_memories,
     remember_memory,

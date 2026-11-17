@@ -2,7 +2,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from pipeline.dreaming import (
+from tools.memory import (
     deprecate_memory_by_id,
     find_conflicting_decisions,
     load_kb_memories,
@@ -22,14 +22,14 @@ def test_remember_and_load_memory():
             title="Architettura Rete",
             tags=["network", "tailscale"],
         )
-        assert mem.id.startswith("mem_deci_")
-        assert mem.status == "active"
-        assert mem.type == "decision"
+        assert mem["id"].startswith("mem_deci_")
+        assert mem["status"] == "active"
+        assert mem["type"] == "decision"
 
         memories = load_kb_memories(source_dir)
         assert len(memories) == 1
-        assert memories[0].id == mem.id
-        assert "Tailscale" in memories[0].content
+        assert memories[0]["id"] == mem["id"]
+        assert "Tailscale" in memories[0]["content"]
 
 
 def test_remember_with_supersedes():
@@ -47,18 +47,18 @@ def test_remember_with_supersedes():
             content="Usare json_store.py invece di SQLite per catalog.",
             memory_type="decision",
             title="Database Decision v2",
-            supersedes_id=mem1.id,
+            supersedes_id=mem1["id"],
         )
 
         memories = load_kb_memories(source_dir)
         assert len(memories) == 2
 
-        m1_reloaded = next(m for m in memories if m.id == mem1.id)
-        assert m1_reloaded.status == "superseded"
-        assert m1_reloaded.superseded_by == mem2.id
+        m1_reloaded = next(m for m in memories if m["id"] == mem1["id"])
+        assert m1_reloaded["status"] == "superseded"
+        assert m1_reloaded["superseded_by"] == mem2["id"]
 
-        m2_reloaded = next(m for m in memories if m.id == mem2.id)
-        assert m2_reloaded.status == "active"
+        m2_reloaded = next(m for m in memories if m["id"] == mem2["id"])
+        assert m2_reloaded["status"] == "active"
 
 
 def test_deprecate_memory():
@@ -71,13 +71,13 @@ def test_deprecate_memory():
             title="Debug flag",
         )
 
-        updated = deprecate_memory_by_id(source_dir, mem.id, reason="Debug session ended")
+        updated = deprecate_memory_by_id(source_dir, mem["id"], reason="Debug session ended")
         assert updated is not None
-        assert updated.status == "deprecated"
-        assert updated.deprecation_reason == "Debug session ended"
+        assert updated["status"] == "deprecated"
+        assert updated["deprecation_reason"] == "Debug session ended"
 
         memories = load_kb_memories(source_dir)
-        assert memories[0].status == "deprecated"
+        assert memories[0]["status"] == "deprecated"
 
 
 def test_query_memories_active_only():
@@ -85,11 +85,11 @@ def test_query_memories_active_only():
         source_dir = Path(tmpdir)
         m1 = remember_memory(source_dir, "Preferisco i commenti Redis", "preference", "Comment Style")
         m2 = remember_memory(source_dir, "Commenti stile JSDoc", "preference", "Old Comment Style")
-        deprecate_memory_by_id(source_dir, m2.id, "Deprecated")
+        deprecate_memory_by_id(source_dir, m2["id"], "Deprecated")
 
         active_res = query_memories(source_dir, "commenti", active_only=True)
         assert len(active_res) == 1
-        assert active_res[0].id == m1.id
+        assert active_res[0]["id"] == m1["id"]
 
         all_res = query_memories(source_dir, "commenti", active_only=False)
         assert len(all_res) == 2
@@ -119,9 +119,9 @@ def test_dreaming_cycle_supersedes_conflicting_decision():
         assert report["superseded_decisions"] >= 1
 
         memories = load_kb_memories(source_dir)
-        d1_reloaded = next(m for m in memories if m.id == d1.id)
-        assert d1_reloaded.status == "superseded"
-        assert d1_reloaded.superseded_by == d2.id
+        d1_reloaded = next(m for m in memories if m["id"] == d1["id"])
+        assert d1_reloaded["status"] == "superseded"
+        assert d1_reloaded["superseded_by"] == d2["id"]
 
 
 def test_dreaming_cycle_episodic_compaction():
@@ -142,5 +142,5 @@ def test_dreaming_cycle_episodic_compaction():
         memories = load_kb_memories(source_dir)
         # Total memories: 5 initial episodics + 1 milestone = 6
         assert len(memories) == 6
-        active_episodics = [m for m in memories if m.type == "episodic" and m.status == "active"]
+        active_episodics = [m for m in memories if m["type"] == "episodic" and m["status"] == "active"]
         assert len(active_episodics) == 2

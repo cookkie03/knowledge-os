@@ -33,7 +33,7 @@ from agent_hooks import (
     inject_pre_prompt_context,
     install_client_hook,
 )
-from pipeline.dreaming import (
+from tools.memory import (
     deprecate_memory_by_id,
     load_kb_memories,
     query_memories,
@@ -1051,7 +1051,7 @@ def cmd_memory_remember(args: argparse.Namespace) -> None:
         tags=args.tags.split(",") if args.tags else [],
         supersedes_id=args.supersedes,
     )
-    print(json.dumps({"ok": True, "memory": mem.to_dict()}, indent=2, ensure_ascii=False))
+    print(json.dumps({"ok": True, "memory": mem}, indent=2, ensure_ascii=False))
 
 
 def _registry_kbs(registry: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1082,7 +1082,7 @@ def cmd_memory_recall(args: argparse.Namespace) -> None:
             top_k=args.top_k,
         )
         for memory in memories:
-            item = memory.to_dict()
+            item = dict(memory)
             item["kb"] = kb["name"]
             results.append(item)
     results.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
@@ -1129,10 +1129,10 @@ def cmd_memory_list(args: argparse.Namespace) -> None:
         sys.exit(f"KB '{args.kb}' not found.")
     memories = load_kb_memories(kb["source_dir"])
     if args.type:
-        memories = [m for m in memories if m.type == args.type]
+        memories = [m for m in memories if m["type"] == args.type]
     if args.status:
-        memories = [m for m in memories if m.status == args.status]
-    print(json.dumps({"ok": True, "count": len(memories), "memories": [m.to_dict() for m in memories]}, indent=2, ensure_ascii=False))
+        memories = [m for m in memories if m["status"] == args.status]
+    print(json.dumps({"ok": True, "count": len(memories), "memories": memories}, indent=2, ensure_ascii=False))
 
 
 def cmd_memory_deprecate(args: argparse.Namespace) -> None:
@@ -1148,7 +1148,7 @@ def cmd_memory_deprecate(args: argparse.Namespace) -> None:
     )
     if not mem:
         sys.exit(f"Memoria '{args.memory_id}' not found.")
-    print(json.dumps({"ok": True, "memory": mem.to_dict()}, indent=2, ensure_ascii=False))
+    print(json.dumps({"ok": True, "memory": mem}, indent=2, ensure_ascii=False))
 
 
 def cmd_import_archive(args: argparse.Namespace) -> None:

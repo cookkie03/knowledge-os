@@ -9,7 +9,7 @@ from agent_hooks import (
     inject_pre_prompt_context,
     install_client_hook,
 )
-from pipeline.dreaming import remember_memory
+from tools.memory import remember_memory
 
 
 def test_inject_pre_prompt_context():

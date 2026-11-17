@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Unified memory management for MCP knowledge bases.
+"""The single implementation of agent memory (remember, recall, deprecate, dream).
 
-This module centralizes all memory operations (remember, recall, capture,
-deprecate, query) that were previously scattered across:
-- src/pipeline/dreaming.py
-- src/cli/memory_manager.py
-- src/cli/agent_hooks.py
-
-Provides a single, consistent API for all MCP-integrated knowledge bases.
+Memories are plain dicts stored as Markdown files with YAML frontmatter under
+<source_dir>/memories/<type>/. CLI and MCP adapters call these functions only.
 
 Key features:
 - Memory record lifecycle (active, superseded, deprecated)
@@ -40,67 +35,6 @@ CONTRADICTION_KEYWORDS: list[str] = [
     "sostituito", "deprecato", "invece di", "non più", "migrato a", "abbandonato",
     "superseded", "instead of", "no longer", "migrated to", "deprecated"
 ]
-
-
-class MemoryRecord:
-    """Structured representation of an agent memory with full lifecycle support.
-
-    Invariant: All MemoryRecord instances have all fields initialized in __init__.
-    The to_dict() method produces a serializable dict with all fields.
-    file_path always stores the resolved absolute path.
-    """
-
-    def __init__(
-        self,
-        id: str,
-        type: str,
-        status: str = "active",
-        title: str = "",
-        tags: list[str] | None = None,
-        created_at: str = "",
-        updated_at: str = "",
-        superseded_by: str | None = None,
-        deprecation_reason: str | None = None,
-        confidence: float = 1.0,
-        source: str = "",
-        content: str = "",
-        file_path: str | None = None,
-    ):
-        self.id = id
-        self.type = type
-        self.status = status
-        self.title = title
-        self.tags: list[str] = list(tags) if tags is not None else []
-        self.created_at: str = created_at
-        self.updated_at: str = updated_at
-        self.superseded_by: str | None = superseded_by
-        self.deprecation_reason: str | None = deprecation_reason
-        self.confidence: float = confidence
-        self.source: str = source
-        self.content: str = content
-        self.file_path: str | None = file_path if file_path else ""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert record to a standard dict for serialization.
-
-        Invariant: Returns a dict with all MemoryRecord fields. Used for
-        JSON serialization when writing to disk.
-        """
-        return {
-            "id": self.id,
-            "type": self.type,
-            "status": self.status,
-            "title": self.title,
-            "tags": list(self.tags),
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "superseded_by": self.superseded_by,
-            "deprecation_reason": self.deprecation_reason,
-            "confidence": self.confidence,
-            "source": self.source,
-            "content": self.content,
-            "file_path": self.file_path,
-        }
 
 
 # ---- File Operations ----
@@ -253,7 +187,7 @@ def serialize_memory_frontmatter(mem: dict[str, Any]) -> str:
     If title exists, it's used as an H1 header before the body.
 
     Args:
-        mem: Dict with memory fields (as returned by parse_memory_file or MemoryRecord.to_dict)
+        mem: Dict with memory fields (as returned by parse_memory_file)
 
     Returns:
         String with YAML frontmatter + markdown body
@@ -314,7 +248,7 @@ def load_kb_memories(source_dir: Path | str) -> list[dict[str, Any]]:
 
 def write_memory_record(
     source_dir: Path | str,
-    mem: dict[str, Any] | MemoryRecord,
+    mem: dict[str, Any],
 ) -> Path:
     """Write or update a memory record on disk in the appropriate subdirectory.
 
@@ -322,19 +256,13 @@ def write_memory_record(
     filename based on the memory ID and a slug of the title. The file is
     written atomically using _atomic_write_file.
 
-    If mem is a MemoryRecord instance, its to_dict() is used. If it's a dict,
-    it's used directly.
-
     Returns the path to the written file.
     """
     source_path = Path(source_dir).resolve()
 
-    if isinstance(mem, MemoryRecord):
-        mem_dict = mem.to_dict()
-    elif isinstance(mem, dict):
-        mem_dict = mem
-    else:
-        raise TypeError(f"mem must be MemoryRecord or dict, got {type(mem)}")
+    if not isinstance(mem, dict):
+        raise TypeError(f"mem must be a dict, got {type(mem)}")
+    mem_dict = mem
 
     target_dir = source_path / "memories" / mem_dict["type"]
     target_dir.mkdir(parents=True, exist_ok=True)
